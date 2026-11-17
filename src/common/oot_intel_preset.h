@@ -17,6 +17,7 @@ inline void SetOcarinaOfTimeIntelLowRecommendedSettings(Values& settings, bool g
         setting.SetValue(value);
     };
     session(settings.renderer_backend, RendererBackend::Vulkan);
+    session(settings.cpu_accuracy, CpuAccuracy::Unsafe);
     session(settings.resolution_setup, ResolutionSetup::Res1_2X);
     session(settings.gpu_accuracy, GpuAccuracy::Low);
     session(settings.use_asynchronous_shaders, true);

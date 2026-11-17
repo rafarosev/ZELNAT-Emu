@@ -477,6 +477,13 @@ void RendererVulkan::Report() const {
     LOG_INFO(Render_Vulkan, "Device: {}", device_info.model);
     LOG_INFO(Render_Vulkan, "Vulkan: {}", api_version);
     LOG_INFO(Render_Vulkan, "Available VRAM: {:.2f} GiB", available_vram);
+    if (device.IsIntel()) {
+        LOG_INFO(Render_Vulkan,
+                 "Intel GPU detected (Intel-only build): mesh_shader={} — without "
+                 "VK_EXT_mesh_shader, task/mesh draws use the compute emulation; if a game "
+                 "shows a black screen or 0 FPS, try EDEN_NX2_NO_MESH=1 and report the log",
+                 device.IsExtMeshShaderSupported());
+    }
     if (VideoCommon::RenderTrace::Enabled()) {
         LOG_INFO(Render_Vulkan, "Render trace enabled: interval=600 frames, log_filter={}",
                  Settings::values.log_filter.GetValue());

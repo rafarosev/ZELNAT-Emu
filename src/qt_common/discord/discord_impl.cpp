@@ -94,7 +94,7 @@ std::string DiscordImpl::GetGameString(const std::string& title) {
     return icon_name;
 }
 
-static constexpr char DEFAULT_DISCORD_TEXT[] = "Lichii is an emulator for the Nintendo Switch";
+static constexpr char DEFAULT_DISCORD_TEXT[] = "Zelnat is an emulator for the Nintendo Switch";
 static constexpr char DEFAULT_DISCORD_IMAGE[] =
     "https://git.eden-emu.dev/eden-emu/eden/raw/branch/master/dist/qt_themes/default/icons/256x256/"
     "eden.png";
@@ -147,7 +147,7 @@ void DiscordImpl::Update() {
             return;
         }
 
-        // Used to format Icon URL for Lichii website game compatibility page
+        // Used to format Icon URL for Zelnat website game compatibility page
         std::string icon_name = GetGameString(game_title);
         auto const game_url = fmt::format(
             "https://raw.githubusercontent.com/eden-emulator/boxart/refs/heads/master/img/{}.png",

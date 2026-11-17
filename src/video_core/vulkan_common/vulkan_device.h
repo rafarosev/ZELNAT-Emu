@@ -1301,6 +1301,14 @@ FN_MAX_LIMIT_LIST
         return properties.driver.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
     }
 
+    /// Intel-only fork: true for Intel GPUs, whether the driver reports itself
+    /// as the Windows proprietary driver, Mesa ANV, or only by vendor ID.
+    bool IsIntel() const noexcept {
+        return properties.driver.driverID == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS ||
+               properties.driver.driverID == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA ||
+               properties.properties.vendorID == 0x8086;
+    }
+
     /// NVIDIA's and AMD's drivers keep a disk cache of built pipelines of their own, so the
     /// emulator keeps none on top: a VkPipelineCache only kept every pipeline the title ever built
     /// in host memory (title 1: a 245 MB file, ~0.35 GB of RAM for the session) and copied it whole

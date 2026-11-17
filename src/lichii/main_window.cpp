@@ -14,6 +14,7 @@
 #include <QSysInfo>
 #include <boost/algorithm/string/split.hpp>
 #include "common/fs/path_util.h"
+#include "common/oot_intel_preset.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "common/shutdown_progress.h"
@@ -31,7 +32,7 @@
 #include "qt_common/discord/discord.h"
 #include "ui_main.h"
 
-// Other Lichii stuff //
+// Other Zelnat stuff //
 #include "debugger/console.h"
 #include "debugger/controller.h"
 
@@ -354,7 +355,7 @@ constexpr int default_mouse_hide_timeout = 2500;
 constexpr int default_input_update_timeout = 1;
 constexpr int EmuThreadStopTimeoutMs = 10'000;
 // A teardown that keeps making progress (Common::ShutdownProgress) is waited for this long at
-// most before Lichii gives up on it and exits.
+// most before Zelnat gives up on it and exits.
 constexpr qint64 MaxEmuThreadShutdownMs = 180'000;
 
 constexpr size_t CopyBufferSize = 1_MiB;
@@ -411,7 +412,7 @@ bool WriteNextendoProfile(Service::Account::ProfileManager& manager, const Commo
     QImage image;
     if (!image.loadFromData(reinterpret_cast<const uchar*>(pull.avatar->data()),
                             static_cast<int>(pull.avatar->size()))) {
-        LOG_WARNING(Frontend, "nextendo.network sent a profile picture Lichii can't read");
+        LOG_WARNING(Frontend, "nextendo.network sent a profile picture Zelnat can't read");
         return true;
     }
     constexpr int size = 256;
@@ -479,13 +480,13 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     default_theme_paths = QIcon::themeSearchPaths();
 
-    // The first launch after an interface update switches to Lichii Dark and explains what moved.
+    // The first launch after an interface update switches to Zelnat Dark and explains what moved.
     const bool whats_new_pending =
         UISettings::values.whats_new_version.GetValue() < WhatsNewDialog::Version;
     if (whats_new_pending) {
         UISettings::values.whats_new_version = WhatsNewDialog::Version;
         UISettings::values.theme =
-            UISettings::themes[static_cast<size_t>(UISettings::Theme::LichiiDark)].second;
+            UISettings::themes[static_cast<size_t>(UISettings::Theme::ZelnatDark)].second;
     }
     UpdateUITheme();
 
@@ -527,14 +528,14 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                 case Common::Nextendo::SignOutReason::None:
                     return;
                 case Common::Nextendo::SignOutReason::SessionExpired:
-                    why = tr("Your Nextendo session expired, so Lichii signed you out.");
+                    why = tr("Your Nextendo session expired, so Zelnat signed you out.");
                     break;
                 case Common::Nextendo::SignOutReason::SessionRevoked:
-                    why = tr("Your session was ended on nextendo.network, so Lichii signed you "
+                    why = tr("Your session was ended on nextendo.network, so Zelnat signed you "
                              "out.");
                     break;
                 case Common::Nextendo::SignOutReason::MissingScope:
-                    why = tr("Your Nextendo sign-in didn't allow online play, so Lichii signed "
+                    why = tr("Your Nextendo sign-in didn't allow online play, so Zelnat signed "
                              "you out.");
                     break;
                 }
@@ -668,7 +669,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     // Set a screensaver inhibition reason string. Currently passed to DBus by SDL and visible to
     // the user through their desktop environment.
-    //: TRANSLATORS: This string is shown to the user to explain why Lichii needs to prevent the
+    //: TRANSLATORS: This string is shown to the user to explain why Zelnat needs to prevent the
     //: computer from sleeping
     QByteArray wakelock_reason = tr("Running a game").toUtf8();
     SDL_SetHint(SDL_HINT_SCREENSAVER_INHIBIT_ACTIVITY_NAME, wakelock_reason.data());
@@ -2185,7 +2186,7 @@ bool MainWindow::LoadROM(const QString& filename, Service::AM::FrontendAppletPar
         case Core::SystemResultStatus::ErrorMemoryAllocation:
             QMessageBox::critical(
                 this, tr("Not enough memory to start the game"),
-                tr("Lichii could not allocate the game's memory. Close other applications and "
+                tr("Zelnat could not allocate the game's memory. Close other applications and "
                    "check that your system has enough available memory and paging-file space, "
                    "then try again."));
             break;
@@ -2334,7 +2335,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     if (close_pending) {
         return;
     }
-    LOG_INFO(Frontend, "Lichii starting...");
+    LOG_INFO(Frontend, "Zelnat starting...");
     report_session.reset();
     game_list->SetReportableProgramId(0);
 
@@ -2377,6 +2378,28 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
 
     PrepareShaderPrecache(title_id, std::filesystem::path{filename.toStdU16String()});
     speed_limit_before_hotkeys.reset();
+
+    if (title_id == Settings::OcarinaOfTimeProgramId && !asked_recommended_oot_intel_settings) {
+        asked_recommended_oot_intel_settings = true;
+        use_recommended_oot_intel_settings =
+            QMessageBox::question(
+                this, tr("Recommended Ocarina of Time settings for Intel iGPUs"),
+                tr("Use the low-end Intel settings for Ocarina of Time?\n\n"
+                   "Vulkan, 0.5x resolution, GPU Fast, asynchronous shaders, BC3, conservative "
+                   "VRAM, reactive flushing off, FIFO Relaxed VSync, handheld mode, FSR, and "
+                   "no anti-aliasing.\n\n"
+                   "They apply to Ocarina of Time until the emulator is closed. Your saved "
+                   "settings are not changed."),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) == QMessageBox::Yes;
+        LOG_INFO(Config, "OoT Intel recommended settings accepted: {}",
+                 use_recommended_oot_intel_settings);
+    }
+    if (Settings::ApplyOcarinaOfTimeIntelLowPreset(Settings::values, title_id,
+                                                   use_recommended_oot_intel_settings)) {
+        QtCommon::system->ApplySettings();
+        Settings::UpdateGPUAccuracy();
+        LOG_INFO(Config, "Applied recommended OoT Intel settings after per-game configuration");
+    }
     Settings::LogSettings();
 
     if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
@@ -2496,7 +2519,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         }
         session.mods = CompatibilityReporting::SummarizeEnabledAddons(mods);
         session.updates = CompatibilityReporting::SummarizeEnabledAddons(updates);
-        session.build = QStringLiteral("Lichii %1 (%2)")
+        session.build = QStringLiteral("Zelnat %1 (%2)")
                             .arg(QString::fromUtf8(Common::g_build_version),
                                  QString::fromUtf8(Common::g_scm_rev).left(12));
 #ifdef ARCHITECTURE_x86_64
@@ -3963,7 +3986,7 @@ void MainWindow::OnMenuReportCompatibility() {
     //         !Settings::values.eden_username.GetValue().empty()) {
     //     } else {
     //         QMessageBox::critical(
-    //             this, tr("Missing Lichii Account"),
+    //             this, tr("Missing Zelnat Account"),
     //             tr("In order to submit a game compatibility test case, you must set up your web
     //             token "
     //                "and "
@@ -5554,7 +5577,7 @@ void MainWindow::OnEmulatorUpdateAvailable() {
             QMessageBox::information(
                 this, title,
                 tr("This is a test or development build (%1) without a published release tag, so "
-                   "Lichii cannot compare it with published releases. Download a release from "
+                   "Zelnat cannot compare it with published releases. Download a release from "
                    "GitHub to get updates.")
                     .arg(QString::fromUtf8(Common::g_build_version)));
             break;
@@ -5578,7 +5601,7 @@ void MainWindow::OnEmulatorUpdateAvailable() {
     }
     if (result.failure == UpdateChecker::Failure::RateLimited) {
         statusBar()->showMessage(
-            tr("Could not check for updates: GitHub rate limit reached. Lichii will try again at "
+            tr("Could not check for updates: GitHub rate limit reached. Zelnat will try again at "
                "the next start."),
             15000);
         return;
@@ -6157,7 +6180,7 @@ void MainWindow::OnCheckGraphicsBackend() {
         UISettings::values.gui_force_x11.SetValue(true);
         GraphicsBackend::SetForceX11(true);
         QMessageBox::information(this, tr("Restart Required"),
-                                 tr("Restart Lichii to apply the X11 backend."));
+                                 tr("Restart Zelnat to apply the X11 backend."));
     }
 }
 #endif
@@ -6284,8 +6307,8 @@ bool MainWindow::ConfirmClose() {
         UISettings::values.confirm_before_stopping.GetValue() == ConfirmStop::Ask_Based_On_Game)
         return true;
 
-    const auto text = tr("Are you sure you want to close Lichii?");
-    return question(this, tr("Lichii"), text);
+    const auto text = tr("Are you sure you want to close Zelnat?");
+    return question(this, tr("Zelnat"), text);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -6391,7 +6414,7 @@ bool MainWindow::ConfirmChangeGame() {
 
     // Use custom question to link controller navigation
     return question(
-        this, tr("Lichii"),
+        this, tr("Zelnat"),
         tr("Are you sure you want to stop the emulation? Any unsaved progress will be lost."),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
 }
@@ -6400,10 +6423,10 @@ bool MainWindow::ConfirmForceLockedExit() {
     if (QtCommon::emu_thread == nullptr)
         return true;
 
-    const auto text = tr("The currently running application has requested Lichii to not exit.\n\n"
+    const auto text = tr("The currently running application has requested Zelnat to not exit.\n\n"
                          "Would you like to bypass this and exit anyway?");
 
-    return question(this, tr("Lichii"), text);
+    return question(this, tr("Zelnat"), text);
 }
 
 void MainWindow::RequestGameExit() {
@@ -6433,9 +6456,9 @@ static void AdjustLinkColor() {
         qApp->setPalette(new_pal);
 }
 
-// Lichii Dark styles most widgets through its stylesheet; the palette covers what Qt draws
+// Zelnat Dark styles most widgets through its stylesheet; the palette covers what Qt draws
 // without one: item view text, disabled text, links and the native parts of dialogs.
-static QPalette LichiiPalette() {
+static QPalette ZelnatPalette() {
     QPalette palette;
     const QColor window(0x17, 0x18, 0x1b);
     const QColor surface(0x20, 0x21, 0x25);
@@ -6541,7 +6564,7 @@ void MainWindow::UpdateUITheme() {
 
     static bool lichii_palette = false;
     if (current_theme == QStringLiteral("lichii")) {
-        qApp->setPalette(LichiiPalette());
+        qApp->setPalette(ZelnatPalette());
         lichii_palette = true;
     } else if (lichii_palette) {
         qApp->setPalette(QPalette());

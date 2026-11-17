@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
+// SPDX-FileCopyrightText: Copyright 2026 Zelnat Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QDesktopServices>
@@ -30,7 +30,7 @@ BugReportDialog::BugReportDialog(Core::System& system, QWidget* parent)
 
     auto* const layout = new QVBoxLayout(this);
     auto* const intro = new QLabel(
-        tr("Lichii is saving this moment: the log, your settings, a screenshot and the next "
+        tr("Zelnat is saving this moment: the log, your settings, a screenshot and the next "
            "frame with its shaders. Describe what went wrong and what you expected."));
     intro->setWordWrap(true);
     layout->addWidget(intro);
@@ -41,7 +41,7 @@ BugReportDialog::BugReportDialog(Core::System& system, QWidget* parent)
     layout->addWidget(description, 1);
 
     auto* const privacy = new QLabel(
-        tr("<b>Send this report privately to the Lichii maintainers</b> (the log bot's /bug "
+        tr("<b>Send this report privately to the Zelnat maintainers</b> (the log bot's /bug "
            "command or a direct message), not to a public channel or issue. It holds the "
            "game's textures and shaders from one frame. Your user name is removed from paths "
            "and online service settings are left out."));

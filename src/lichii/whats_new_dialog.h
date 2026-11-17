@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 Lichii Project
+// SPDX-FileCopyrightText: Copyright 2026 Zelnat Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once

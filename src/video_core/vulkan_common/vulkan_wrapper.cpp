@@ -57,8 +57,8 @@ void SortPhysicalDevices(std::vector<VkPhysicalDevice>& devices, const InstanceD
         return lhs.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU &&
                rhs.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
     });
-    // Prefer Nvidia over AMD, AMD over Intel, Intel over the rest.
-    SortPhysicalDevicesPerVendor(devices, dld, {0x10DE, 0x1002, 0x8086});
+    // Intel-only fork: prefer Intel over AMD, AMD over Nvidia, Nvidia over the rest.
+    SortPhysicalDevicesPerVendor(devices, dld, {0x8086, 0x1002, 0x10DE});
     // Demote Microsoft's Dozen devices to the bottom.
     SortPhysicalDevices(
         devices, dld,

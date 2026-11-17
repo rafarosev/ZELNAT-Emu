@@ -46,17 +46,17 @@ Q_DECLARE_METATYPE(GameListItemType);
  * @param size The desired width and height of the default icon.
  * @return QPixmap default icon
  */
-static bool IsLichiiTheme() {
+static bool IsZelnatTheme() {
     return UISettings::values.theme == "lichii";
 }
 
 static QPixmap GetDefaultIcon(u32 size) {
-    if (size == 0 || !IsLichiiTheme()) {
+    if (size == 0 || !IsZelnatTheme()) {
         QPixmap icon(size, size);
         icon.fill(Qt::transparent);
         return icon;
     }
-    // Lichii Dark draws a game without art as a tile with a controller glyph.
+    // Zelnat Dark draws a game without art as a tile with a controller glyph.
     const int side = static_cast<int>(size);
     QImage icon(side, side, QImage::Format_ARGB32_Premultiplied);
     icon.fill(Qt::transparent);
@@ -74,7 +74,7 @@ static QPixmap GetDefaultIcon(u32 size) {
 }
 
 static QPixmap RoundedIcon(const QPixmap& picture) {
-    if (!IsLichiiTheme() || picture.isNull()) {
+    if (!IsZelnatTheme() || picture.isNull()) {
         return picture;
     }
     QImage icon(picture.size(), QImage::Format_ARGB32_Premultiplied);
@@ -91,8 +91,8 @@ static QPixmap RoundedIcon(const QPixmap& picture) {
 }
 
 static QPixmap ThemeIcon(const char* name) {
-    if (IsLichiiTheme()) {
-        // Lichii Dark keeps folder rows compact with the 16 px line icons from its set.
+    if (IsZelnatTheme()) {
+        // Zelnat Dark keeps folder rows compact with the 16 px line icons from its set.
         const std::string_view icon{name};
         const char* lichii_name = icon == "sd_card"    ? "sd"
                                   : icon == "chip"     ? "cpu"

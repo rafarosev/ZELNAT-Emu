@@ -46,7 +46,7 @@ void GameGrid::ApplyFilter(const QString& edit_filter_text, GameListModel* model
         if (!item)
             continue;
 
-        if (Lichii::FilterMatches(edit_filter_text, item)) {
+        if (Zelnat::FilterMatches(edit_filter_text, item)) {
             setRowHidden(i, false);
         } else {
             setRowHidden(i, true);

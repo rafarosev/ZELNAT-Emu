@@ -22,11 +22,11 @@
      <item>
       <widget class="QGroupBox" name="groupBoxWebConfig">
        <property name="title">
-        <string>Lichii Web Service</string>
+        <string>Zelnat Web Service</string>
        </property>
-       <layout class="QVBoxLayout" name="verticalLayoutLichiiWebService">
+       <layout class="QVBoxLayout" name="verticalLayoutZelnatWebService">
         <item>
-         <layout class="QGridLayout" name="gridLayoutLichiiUsername">
+         <layout class="QGridLayout" name="gridLayoutZelnatUsername">
           <item row="1" column="0">
            <widget class="QLabel" name="label_token">
             <property name="text">

@@ -75,7 +75,7 @@ const Themes themes{{
     {"Dark Colorful", "colorful_dark"},
     {"Midnight Blue", "qdarkstyle_midnight_blue"},
     {"Midnight Blue Colorful", "colorful_midnight_blue"},
-    {"Lichii Dark", "lichii"},
+    {"Zelnat Dark", "lichii"},
 }};
 
 bool IsDarkTheme() {

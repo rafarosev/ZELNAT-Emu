@@ -634,11 +634,14 @@ private:
     UserDataMigrator user_data_migrator;
     std::unique_ptr<QtConfig> config;
 
-    // Whether emulation is currently running in Lichii.
+    // Whether emulation is currently running in Zelnat.
     bool emulation_running = false;
     std::optional<CompatibilityReporting::Session> report_session;
     bool boot_in_progress = false;
     bool close_pending = false;
+    // Intel-only fork: the Ocarina of Time Intel-low preset is offered once per session.
+    bool asked_recommended_oot_intel_settings = false;
+    bool use_recommended_oot_intel_settings = false;
     // The path to the game currently running
     QString current_game_path;
     // Whether a user was set on the command line (skips UserSelector if it's forced to show up)

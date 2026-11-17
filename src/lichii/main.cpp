@@ -87,10 +87,10 @@ static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
 }
 
 #if defined(__unix__) && !defined(__APPLE__) && !defined(__ANDROID__)
-/// On NVIDIA, Lichii keeps no driver pipeline cache of its own (DriverCachesPipelines) and relies on
+/// On NVIDIA, Zelnat keeps no driver pipeline cache of its own (DriverCachesPipelines) and relies on
 /// the driver's disk cache, whose default limit is 1 GiB for the whole cache folder. A large Ocarina
 /// of Time cache (~20,000 pipelines) fills it, and every boot then compiles the pipelines that no
-/// longer fit again. Before anything loads the driver, give Lichii its own cache folder, so another
+/// longer fit again. Before anything loads the driver, give Zelnat its own cache folder, so another
 /// application running with the default limit can't trim it, and raise the limit to 10 GiB. A value
 /// the user set for either variable is kept. Other drivers ignore both.
 static void SetUpNvidiaShaderDiskCache() {
@@ -104,7 +104,7 @@ static void SetUpNvidiaShaderDiskCache() {
             base = std::filesystem::path{home} / ".cache";
         }
         if (!base.empty()) {
-            const std::filesystem::path folder = base / "lichii" / "nvidia";
+            const std::filesystem::path folder = base / "zelnat" / "nvidia";
             std::error_code ec;
             std::filesystem::create_directories(folder, ec);
             if (!ec) {
@@ -152,7 +152,7 @@ int main(int argc, char* argv[]) {
 
     // Init settings params
     QCoreApplication::setOrganizationName(QStringLiteral("eden"));
-    QCoreApplication::setApplicationName(QStringLiteral("Lichii"));
+    QCoreApplication::setApplicationName(QStringLiteral("Zelnat"));
 
     // Increases the maximum open file limit.
     // TODO: This should be common to all frontends.
@@ -204,7 +204,7 @@ int main(int argc, char* argv[]) {
 
     // Fix the Wayland appId. This needs to match the name of the .desktop file without the .desktop
     // suffix.
-    QGuiApplication::setDesktopFileName(QStringLiteral("io.github.zortos293.lichii"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("io.github.zortos293.zelnat"));
 #endif
 
     auto rounding_policy = GetHighDpiRoundingPolicy();
@@ -258,7 +258,7 @@ int main(int argc, char* argv[]) {
                     &MainWindow::OnAppFocusStateChanged);
         return app.exec();
     } catch (const std::exception& exception) {
-        QMessageBox::critical(nullptr, QObject::tr("Lichii startup stopped"),
+        QMessageBox::critical(nullptr, QObject::tr("Zelnat startup stopped"),
                               QString::fromUtf8(exception.what()));
         return EXIT_FAILURE;
     }

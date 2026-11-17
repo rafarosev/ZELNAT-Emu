@@ -19,16 +19,16 @@
 
 namespace {
 
-// Draws the name column the way Lichii Dark lays it out: a game's title over a muted
+// Draws the name column the way Zelnat Dark lays it out: a game's title over a muted
 // monospace second line with a star for favourites, and a folder's game count after its path.
-class LichiiNameDelegate final : public QStyledItemDelegate {
+class ZelnatNameDelegate final : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override {
         const auto type = index.data(GameListItem::TypeRole).value<GameListItemType>();
-        if (!IsLichiiTheme() || type == GameListItemType::AddDir) {
+        if (!IsZelnatTheme() || type == GameListItemType::AddDir) {
             QStyledItemDelegate::paint(painter, option, index);
             return;
         }
@@ -119,7 +119,7 @@ public:
 
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
         QSize size = QStyledItemDelegate::sizeHint(option, index);
-        if (!IsLichiiTheme()) {
+        if (!IsZelnatTheme()) {
             return size;
         }
         const auto type = index.data(GameListItem::TypeRole).value<GameListItemType>();
@@ -136,7 +136,7 @@ public:
 } // namespace
 
 GameTree::GameTree(QWidget* parent) : QTreeView{parent} {
-    setItemDelegateForColumn(GameListModel::COLUMN_NAME, new LichiiNameDelegate(this));
+    setItemDelegateForColumn(GameListModel::COLUMN_NAME, new ZelnatNameDelegate(this));
     setAlternatingRowColors(true);
     setSelectionMode(QHeaderView::SingleSelection);
     setSelectionBehavior(QHeaderView::SelectRows);
@@ -263,7 +263,7 @@ void GameTree::ApplyFilter(const QString& edit_filter_text, GameListModel* model
 
             const QStandardItem* child = folder->child(j, 0);
 
-            if (Lichii::FilterMatches(edit_filter_text, child)) {
+            if (Zelnat::FilterMatches(edit_filter_text, child)) {
                 setRowHidden(j, folder_index, false);
                 ++result_count;
             } else {

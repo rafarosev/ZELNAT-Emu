@@ -773,9 +773,9 @@ endif()
 if(ENABLE_QT AND UNIX AND NOT APPLE)
     install(FILES "dist/io.github.zortos293.lichii.desktop"
         DESTINATION "share/applications")
-    install(FILES "dist/lichii.png"
+    install(FILES "dist/zelnat.png"
         DESTINATION "share/icons/hicolor/256x256/apps"
-        RENAME "io.github.zortos293.lichii.png")
+        RENAME "io.github.zortos293.zelnat.png")
 
     install(FILES "dist/io.github.zortos293.lichii.xml"
         DESTINATION "share/mime/packages")

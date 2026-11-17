@@ -283,7 +283,7 @@ static std::atomic_bool pack_nup_cancel{false};
 static std::atomic_bool unpack_nup_cancel{false};
 static std::atomic_bool edit_nup_cancel{false};
 
-// eden-cli --pack-nup <dump> [<out.nup>]; the output defaults to <dump>.nup next to the dump.
+// zelnat-cli --pack-nup <dump> [<out.nup>]; the output defaults to <dump>.nup next to the dump.
 static bool PackNup(const std::string& source, const std::string& output) {
     const auto to_path = [](const std::string& utf8) {
         return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
@@ -324,7 +324,7 @@ static bool PackNup(const std::string& source, const std::string& output) {
     }
 }
 
-// eden-cli --unpack-nup <file.nup> [<out_dir>]; the output defaults to <name>/ next to the NUP.
+// zelnat-cli --unpack-nup <file.nup> [<out_dir>]; the output defaults to <name>/ next to the NUP.
 static bool UnpackNup(const std::string& source, const std::string& output) {
     const auto to_path = [](const std::string& utf8) {
         return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
@@ -487,9 +487,9 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
 }
 
 /// GPU trace replay (docs/nx2/gpu-trace.md):
-///   eden-cli --replay <trace> --out <dir> [--frames N] [--device N]
+///   zelnat-cli --replay <trace> --out <dir> [--frames N] [--device N]
 ///                     [--record <trace> --record-from <present> --record-presents N]
-///   eden-cli --gpu-trace-sample <trace>: writes the synthetic trace.
+///   zelnat-cli --gpu-trace-sample <trace>: writes the synthetic trace.
 static bool ReplayGpuTrace(Core::System& system, int argc, char** argv) {
     namespace GpuTrace = VideoCommon::GpuTrace;
     if (std::string_view{argv[1]} == "--gpu-trace-sample") {

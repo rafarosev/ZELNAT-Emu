@@ -7,7 +7,7 @@
 
 // Lichii data directories
 
-#define EDEN_DIR "lichii"
+#define EDEN_DIR "zelnat"
 #define EDEN_LEGACY_DIR "eden"
 #define PORTABLE_DIR "user"
 

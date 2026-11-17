@@ -50,6 +50,13 @@ void KMemoryManager::Initialize(KVirtualAddress management_region, size_t manage
     // Memory a previous kernel handed out may still hold its data.
     m_system.DeviceMemory().buffer.ForgetContents();
 
+    // The optimized-process bitmap lives in this region of DRAM and is written through the
+    // backing (InitializeOptimizedMemory) without anything ever mapping it.
+    const KPhysicalAddress management_physical =
+        m_system.Kernel().MemoryLayout().GetLinearPhysicalAddress(management_region);
+    m_system.DeviceMemory().buffer.EnsureCommitted(
+        GetInteger(management_physical) - Core::DramMemoryMap::Base, management_region_size);
+
     // Clear the management region to zero.
     const KVirtualAddress management_region_end = management_region + management_region_size;
     // std::memset(GetVoidPointer(management_region), 0, management_region_size);
@@ -251,6 +258,11 @@ KPhysicalAddress KMemoryManager::AllocateAndOpenContinuous(size_t num_pages, siz
 void KMemoryManager::MarkUsed(KPhysicalAddress address, size_t num_pages) {
     m_system.DeviceMemory().buffer.MarkUsed(GetInteger(address) - Core::DramMemoryMap::Base,
                                             num_pages * PageSize);
+    // Every allocation funnels through here, and the kernel and services dereference the
+    // backing for much of what they hand out (shared memory, page metadata, IPC buffers)
+    // without a mapping ever covering it.
+    m_system.DeviceMemory().buffer.EnsureCommitted(GetInteger(address) - Core::DramMemoryMap::Base,
+                                                   num_pages * PageSize);
 }
 
 void KMemoryManager::MarkDirty(KPhysicalAddress address, size_t num_pages) {

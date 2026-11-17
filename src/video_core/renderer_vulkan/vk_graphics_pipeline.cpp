@@ -1552,8 +1552,17 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 build->Wait(!worker_only_build);
             });
         }
+        // EDEN_NX2_MESH_BUFFER_BARRIERS=0: order the draw after the emulation's dispatch
+        // with a global memory barrier instead of barriers on the output (and task
+        // argument) buffers alone, which are all the draw's vertex shader reads.
+        static const bool mesh_buffer_barriers{[] {
+            const char* const value{std::getenv("EDEN_NX2_MESH_BUFFER_BARRIERS")};
+            return value == nullptr || value[0] != '0';
+        }()};
         scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
                           task_buffers = mesh_task_buffers,
+                          output_buffer = mesh_output_buffer, output_offset = mesh_output_offset,
+                          output_size = mesh_output_size, buffer_barriers = mesh_buffer_barriers,
                           rescaling_data = rescaling.Data(), is_rescaling = texture_cache.IsRescaling(),
                           uses_render_area = render_area.uses_render_area,
                           render_area_data = render_area.words](vk::CommandBuffer cmdbuf) {
@@ -1596,6 +1605,36 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 };
                 cmdbuf.PipelineBarrier(src_stages, dst_stages, 0, barrier);
             };
+            // The draw's vertex shader reads only the emulation's output (and, with a
+            // task program, its argument buffer), so the dispatch-to-draw dependency
+            // needs no wider scope than those buffers.
+            const auto output_barrier = [&] {
+                if (!buffer_barriers || !output_buffer) {
+                    memory_barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                   VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
+                    return;
+                }
+                const auto barrier_for = [&](const MeshEmulationBuffer& target) {
+                    const VkBufferMemoryBarrier barrier{
+                        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .buffer = target.buffer,
+                        .offset = target.offset,
+                        .size = target.size,
+                    };
+                    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                           VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, barrier);
+                };
+                barrier_for({output_buffer, output_offset, output_size});
+                if (has_task) {
+                    barrier_for(task_buffers[2]);
+                }
+            };
             // The scheduler orders earlier compute writes only before the next render pass
             // (COMPUTE -> ALL_GRAPHICS); these dispatches run before it, and the programs read
             // what the game's compute passes wrote (foliage instance lists, for one).
@@ -1607,9 +1646,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *mesh_compute_pipeline);
                 bind_program_state();
                 cmdbuf.Dispatch(groups, 1, 1);
-                memory_barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                               VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
+                output_barrier();
                 return;
             }
             // 1. One task workgroup per draw group writes its payload (mesh workgroup count at
@@ -1670,9 +1707,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *mesh_compute_pipeline);
             bind_program_state();
             cmdbuf.DispatchIndirect(task_buffers[2].buffer, task_buffers[2].offset);
-            memory_barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                           VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
+            output_barrier();
         });
     }
     scheduler.RequestRenderpass(texture_cache.GetFramebuffer());

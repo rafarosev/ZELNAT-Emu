@@ -46,6 +46,6 @@ TEST_CASE("Ocarina of Time Intel-low preset applies only when accepted for OoT",
     CHECK_FALSE(settings->use_reactive_flushing.GetValue());
     CHECK(settings->vsync_mode.GetValue() == Settings::VSyncMode::FifoRelaxed);
     CHECK(settings->use_docked_mode.GetValue() == Settings::ConsoleMode::Handheld);
-    CHECK(settings->scaling_filter.GetValue() == Settings::ScalingFilter::Fsr);
+    CHECK(settings->scaling_filter.GetValue() == Settings::ScalingFilter::Bilinear);
     CHECK(settings->anti_aliasing.GetValue() == Settings::AntiAliasing::None);
 }

@@ -26,7 +26,7 @@ inline void SetOcarinaOfTimeIntelLowRecommendedSettings(Values& settings, bool g
     session(settings.use_reactive_flushing, false);
     session(settings.vsync_mode, VSyncMode::FifoRelaxed);
     session(settings.use_docked_mode, ConsoleMode::Handheld);
-    session(settings.scaling_filter, ScalingFilter::Fsr);
+    session(settings.scaling_filter, ScalingFilter::Bilinear);
     session(settings.anti_aliasing, AntiAliasing::None);
 }
 

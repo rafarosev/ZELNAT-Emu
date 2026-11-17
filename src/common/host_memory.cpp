@@ -7,6 +7,7 @@
 
 #include <iterator>
 #include "common/container/unordered_map.h"
+#include <boost/icl/interval_map.hpp>
 #include <boost/icl/separate_interval_set.hpp>
 #include <windows.h>
 #include <psapi.h>
@@ -160,6 +161,34 @@ public:
             return false;
         }
 
+        lazy_commit = LazyCommitRequested();
+        if (lazy_commit) {
+            if (CreateViews(true) && ProbeLazyCommit()) {
+                LOG_INFO(HW_Memory,
+                         "Lazy commit enabled (EDEN_NX2_LAZY_COMMIT=1): {} MiB of backing memory "
+                         "commits as it is mapped or handed out, not up front",
+                         backing_size >> 20);
+                return true;
+            }
+            Release();
+            lazy_commit = false;
+            LOG_WARNING(HW_Memory, "Lazy commit unavailable, allocating backing memory in full");
+        }
+        return CreateViews(false);
+    }
+
+    /// Creates the backing section, the linear backing view and the virtual arena. With
+    /// reserve_only the section is created with SEC_RESERVE and commits nothing; otherwise
+    /// it is created with SEC_COMMIT by the retry loop below, as before.
+    bool CreateViews(bool reserve_only) {
+        if (reserve_only) {
+            backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, SEC_RESERVE, backing_size, nullptr, nullptr, 0);
+            if (!backing_handle) {
+                LOG_WARNING(HW_Memory, "Failed to reserve {} MiB of backing memory (error {})",
+                            backing_size >> 20, GetLastError());
+                return false;
+            }
+        }
         // Allocate backing file map. SEC_COMMIT charges all of it to the commit limit up front, and
         // when the free commit is only just above its size the call fails with
         // ERROR_NO_SYSTEM_RESOURCES without growing a system-managed page file. The emulator then
@@ -240,6 +269,14 @@ public:
         ASSERT(placeholders.find({virtual_offset, virtual_offset + length}) == placeholders.end());
         TrackPlaceholder(virtual_offset, host_offset, length);
 
+        if (lazy_commit) {
+            // The view can be touched the moment it exists: its backing pages commit first.
+            CommitRange(host_offset, length);
+            view_coverage +=
+                std::make_pair(boost::icl::interval<size_t>::right_open(host_offset,
+                                                                         host_offset + length),
+                               1);
+        }
         MapView(virtual_offset, host_offset, length);
     }
 
@@ -301,6 +338,21 @@ public:
         return host_pointer_it->second + virtual_offset - it->lower();
     }
 
+    /// Commits a backing range the host is about to dereference without a view (kernel
+    /// allocations, hand-out clears). Such ranges are never decommitted again: the kernel
+    /// may keep using them after every view is gone. No-op unless lazy commit is active.
+    void EnsureCommitted(size_t host_offset, size_t length) {
+        if (!lazy_commit || length == 0) {
+            return;
+        }
+        std::scoped_lock lock{placeholder_mutex};
+        const auto [begin, end] = AlignedExtent(host_offset, length);
+        if (begin < end) {
+            kernel_extents.insert({begin, end});
+        }
+        CommitRange(host_offset, length);
+    }
+
     void EnableDirectMappedAddress() {
         // TODO
         UNREACHABLE();
@@ -315,6 +367,9 @@ public:
 private:
     /// Release all resources in the object
     void Release() {
+        committed_extents.clear();
+        kernel_extents.clear();
+        view_coverage.clear();
         if (!placeholders.empty()) {
             for (const auto& placeholder : placeholders) {
                 if (!pfn_UnmapViewOfFile2(process, virtual_base + placeholder.lower(),
@@ -417,6 +472,15 @@ private:
             TrackPlaceholder(unmap_end, host_offset + unmap_end - placeholder_begin,
                              placeholder_end - unmap_end);
         }
+        if (lazy_commit) {
+            const size_t removed_offset = host_offset + unmap_begin - placeholder_begin;
+            const size_t removed_length = unmap_end - unmap_begin;
+            view_coverage -= std::make_pair(
+                boost::icl::interval<size_t>::right_open(removed_offset,
+                                                         removed_offset + removed_length),
+                1);
+            TryDecommit(removed_offset, removed_length);
+        }
         return true;
     }
 
@@ -451,6 +515,113 @@ private:
         placeholders.erase(it);
     }
 
+    static bool LazyCommitRequested() {
+        const char* const value = std::getenv("EDEN_NX2_LAZY_COMMIT");
+        return value != nullptr && value[0] == '1' && value[1] == '\0';
+    }
+
+    /// The one Windows-semantics assumption lazy commit rests on: a page of the SEC_RESERVE
+    /// section committed through the backing view is the same page in every other view, and
+    /// MEM_DECOMMIT returns it to the reserved state. Proven here, before any guest exists;
+    /// offset 0 is scratch at this point and decommit discards what the probe wrote.
+    bool ProbeLazyCommit() {
+        const size_t probe_size = (std::min)(HugePageSize, backing_size);
+        if (!VirtualAlloc(backing_base, probe_size, MEM_COMMIT, PAGE_READWRITE)) {
+            return false;
+        }
+        bool ok = false;
+        if (void* const view = MapViewOfFile(backing_handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0,
+                                             probe_size)) {
+            auto* const via_backing = reinterpret_cast<volatile u64*>(backing_base);
+            auto* const via_view = reinterpret_cast<volatile u64*>(view);
+            via_backing[0] = 0x1122334455667788ULL;
+            via_view[1] = ~via_backing[0];
+            ok = via_view[0] == 0x1122334455667788ULL &&
+                 via_backing[1] == ~0x1122334455667788ULL;
+            UnmapViewOfFile(view);
+        }
+        if (!VirtualFree(backing_base, probe_size, MEM_DECOMMIT)) {
+            ok = false;
+        }
+        return ok;
+    }
+
+    /// Backing range aligned outward to the commit granularity, clamped to the backing size.
+    std::pair<size_t, size_t> AlignedExtent(size_t host_offset, size_t length) const {
+        const size_t begin = AlignDown(host_offset, HugePageSize);
+        const size_t end = (std::min)(AlignUp(host_offset + length, HugePageSize), backing_size);
+        return {begin, end};
+    }
+
+    /// Commits the still-uncommitted parts of a backing range through the backing view.
+    /// The placeholder mutex must be held. Returns false when a commit failed even after
+    /// the page-file growth probe Init uses; the failure is logged with its range and the
+    /// caller carries on, as MapView does for a failed view.
+    bool CommitRange(size_t host_offset, size_t length) {
+        const auto [begin, end] = AlignedExtent(host_offset, length);
+        if (begin >= end) {
+            return true;
+        }
+        boost::icl::separate_interval_set<size_t> missing;
+        missing.insert({begin, end});
+        missing -= committed_extents;
+        for (const auto& interval : missing) {
+            const size_t size = interval.upper() - interval.lower();
+            bool committed = VirtualAlloc(backing_base + interval.lower(), size, MEM_COMMIT,
+                                          PAGE_READWRITE) != nullptr;
+            if (!committed) {
+                if (void* const probe = VirtualAlloc(nullptr, backing_size,
+                                                     MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) {
+                    VirtualFree(probe, 0, MEM_RELEASE);
+                }
+                committed = VirtualAlloc(backing_base + interval.lower(), size, MEM_COMMIT,
+                                         PAGE_READWRITE) != nullptr;
+            }
+            if (!committed) {
+                LOG_CRITICAL(HW_Memory, "Failed to commit {} MiB of backing memory at offset "
+                                        "{:#x} (error {})",
+                             size >> 20, interval.lower(), GetLastError());
+                return false;
+            }
+            committed_extents.insert({interval.lower(), interval.upper()});
+        }
+        return true;
+    }
+
+    /// Decommits the parts of a backing range no view covers any more and the kernel does
+    /// not hold. The placeholder mutex must be held.
+    void TryDecommit(size_t host_offset, size_t length) {
+        const auto [begin, end] = AlignedExtent(host_offset, length);
+        if (begin >= end) {
+            return;
+        }
+        boost::icl::separate_interval_set<size_t> freeable;
+        freeable.insert({begin, end});
+        freeable &= committed_extents;
+        freeable -= kernel_extents;
+        for (const auto& segment : view_coverage) {
+            if (segment.first.upper() <= begin) {
+                continue;
+            }
+            if (segment.first.lower() >= end) {
+                break;
+            }
+            if (segment.second > 0) {
+                freeable.erase({segment.first.lower(), segment.first.upper()});
+            }
+        }
+        for (const auto& interval : freeable) {
+            const size_t size = interval.upper() - interval.lower();
+            if (VirtualFree(backing_base + interval.lower(), size, MEM_DECOMMIT)) {
+                committed_extents.erase({interval.lower(), interval.upper()});
+            } else {
+                LOG_WARNING(HW_Memory, "Failed to decommit {} MiB of backing memory at offset "
+                                       "{:#x} (error {})",
+                            size >> 20, interval.lower(), GetLastError());
+            }
+        }
+    }
+
     /// Return true when a given memory region is a "nieche" and the placeholders don't have to be
     /// split.
     bool IsNiechePlaceholder(size_t virtual_offset, size_t length) const {
@@ -474,6 +645,12 @@ private:
     std::mutex placeholder_mutex;                                 ///< Mutex for placeholders
     boost::icl::separate_interval_set<size_t> placeholders;       ///< Mapped placeholders
     ::Common::unordered_map<size_t, size_t> placeholder_host_pointers; ///< Placeholder backing offset
+
+    // Lazy commit state, all guarded by placeholder_mutex and empty unless it is active.
+    bool lazy_commit{};
+    boost::icl::separate_interval_set<size_t> committed_extents; ///< Committed backing extents
+    boost::icl::separate_interval_set<size_t> kernel_extents;    ///< Kernel-held extents: never decommitted
+    boost::icl::interval_map<size_t, int> view_coverage;         ///< Backing range -> covering views
 };
 
 #elif defined(__OPENORBIS__) || defined(__managarm__)
@@ -1257,6 +1434,8 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
     if (length == 0) {
         return;
     }
+    // The memsets below dereference the backing directly, mapped or not.
+    EnsureCommitted(physical_offset, length);
     MarkUsed(physical_offset, length);
     if (fill_value != 0) {
         std::memset(backing_base + physical_offset, fill_value, length);
@@ -1317,6 +1496,17 @@ void HostMemory::MarkDirty(size_t physical_offset, size_t length) {
     for (size_t index = physical_offset >> GranuleShift; index <= last; ++index) {
         granules[index].fetch_or(GranuleDirty, std::memory_order_release);
     }
+}
+
+void HostMemory::EnsureCommitted(size_t physical_offset, size_t length) {
+#ifdef _WIN32
+    if (impl) {
+        impl->EnsureCommitted(physical_offset, length);
+    }
+#else
+    static_cast<void>(physical_offset);
+    static_cast<void>(length);
+#endif
 }
 
 void HostMemory::ForgetContents() {

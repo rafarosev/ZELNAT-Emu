@@ -78,6 +78,11 @@ public:
     /// Pages given back to the kernel: their contents are no longer known to be zero.
     void MarkDirty(size_t physical_offset, size_t length);
 
+    /// Makes sure the host can dereference this backing range directly. Only Windows lazy
+    /// commit (EDEN_NX2_LAZY_COMMIT=1) defers committing backing pages; everywhere else the
+    /// backing is fully committed at creation and this is a no-op.
+    void EnsureCommitted(size_t physical_offset, size_t length);
+
     /// A new kernel on this memory: everything a previous one used may hold data.
     void ForgetContents();
 

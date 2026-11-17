@@ -63,12 +63,54 @@ constexpr size_t PRELUDE_COMMIT_SIZE = 16 * 1024 * 1024;
 #ifdef _WIN32
 constexpr size_t COMMIT_STEP = 4 * 1024 * 1024;
 
+// Generated code calls host functions with rel32 displacements, so the code space must be
+// reserved within ±2 GiB of this image. VirtualAlloc2 states that window directly through
+// MEM_ADDRESS_REQUIREMENTS; it is resolved at runtime (as in Common::HostMemory) and every
+// failure falls back to the unconstrained reserve in ReservingAllocator.
+using PFN_VirtualAlloc2 = PVOID(WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, ULONG,
+                                         MEM_EXTENDED_PARAMETER*, ULONG);
+
+void* ReserveCodeSpaceNearImage(size_t size) {
+    static const auto pfn_VirtualAlloc2 = [] {
+        const HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
+        return kernelbase ? reinterpret_cast<PFN_VirtualAlloc2>(
+                                GetProcAddress(kernelbase, "VirtualAlloc2"))
+                          : nullptr;
+    }();
+    if (!pfn_VirtualAlloc2) {
+        return nullptr;
+    }
+    constexpr uintptr_t max_distance = (uintptr_t{2} << 30) - (uintptr_t{64} << 20);
+    const uintptr_t anchor = reinterpret_cast<uintptr_t>(&ReserveCodeSpaceNearImage);
+    MEM_ADDRESS_REQUIREMENTS requirements{};
+    requirements.LowestStartingAddress =
+        anchor > max_distance ? reinterpret_cast<void*>(anchor - max_distance) : nullptr;
+    // HighestEndingAddress is the last byte of the region, inclusive.
+    requirements.HighestEndingAddress = reinterpret_cast<void*>(anchor + max_distance - 1);
+    MEM_EXTENDED_PARAMETER param{};
+    param.Type = MemExtendedParameterAddressRequirements;
+    param.Pointer = &requirements;
+    return pfn_VirtualAlloc2(GetCurrentProcess(), nullptr, size, MEM_RESERVE, PAGE_NOACCESS,
+                             &param, 1);
+}
+
 // Reserves the code space; EnsureMemoryCommitted commits it as code is emitted. Xbyak's default
 // allocator commits all of it up front: 512 MiB per core, 3 GiB of commit charge for six cores
 // of which a game fills a fraction.
 struct ReservingAllocator final : Xbyak::Allocator {
     uint8_t* alloc(size_t size) override {
-        return static_cast<uint8_t*>(VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS));
+        if (uint8_t* p = static_cast<uint8_t*>(ReserveCodeSpaceNearImage(size))) {
+            const uintptr_t anchor = reinterpret_cast<uintptr_t>(&ReserveCodeSpaceNearImage);
+            const uintptr_t base = reinterpret_cast<uintptr_t>(p);
+            LOG_INFO(Core, "JIT code cache reserved near image at {:#x} (distance {} MiB)", base,
+                     (base > anchor ? base - anchor : anchor - base) >> 20);
+            return p;
+        }
+        uint8_t* p =
+            static_cast<uint8_t*>(VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS));
+        LOG_INFO(Core, "JIT code cache fell back to unconstrained reserve at {:#x}",
+                 reinterpret_cast<uintptr_t>(p));
+        return p;
     }
     void free(uint8_t* p) override {
         VirtualFree(p, 0, MEM_RELEASE);

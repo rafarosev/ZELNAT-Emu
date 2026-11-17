@@ -537,6 +537,7 @@ jobs:
           New-Item -ItemType Directory -Force build/release/symbols | Out-Null
           Move-Item build/release/bin/*.pdb build/release/symbols/
           windeployqt --release --no-translations build/release/bin/zelnat.exe
+          Copy-Item dist/zelnat-lazy.bat build/release/bin/
           if (Get-ChildItem -Recurse build/release/bin -Filter 'GFSDK_*') {
             throw 'build/release/bin holds Nsight Aftermath files, which must not ship'
           }

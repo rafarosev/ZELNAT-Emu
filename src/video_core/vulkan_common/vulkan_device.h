@@ -772,6 +772,11 @@ FN_MAX_LIMIT_LIST
         return extensions.image_format_list || instance_version >= VK_API_VERSION_1_2;
     }
 
+    /// Returns true if the device supports vkCmdDrawIndirectCount (core in Vulkan 1.2).
+    bool IsKhrDrawIndirectCountSupported() const {
+        return extensions.draw_indirect_count || instance_version >= VK_API_VERSION_1_2;
+    }
+
     /// Returns true if the device supports VK_EXT_primitive_topology_list_restart.
     bool IsTopologyListPrimitiveRestartSupported() const {
         return features.primitive_topology_list_restart.primitiveTopologyListRestart;

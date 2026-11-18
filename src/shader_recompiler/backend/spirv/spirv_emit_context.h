@@ -464,6 +464,8 @@ public:
     Id mesh_task_offsets_buffer{};
     Id mesh_task_args_buffer{};
     Id mesh_group_index{};
+    /// Draw-count compaction: per-workgroup emitted primitive counts (RuntimeInfo).
+    Id mesh_counts_buffer{};
     /// NumWorkgroups of a native mesh program (Profile::has_broken_mesh_user_sgprs only).
     Id mesh_num_workgroups{};
 

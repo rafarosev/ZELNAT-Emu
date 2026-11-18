@@ -109,6 +109,13 @@ struct MeshEmulationSetup {
     u32 offsets_binding{};
     u32 args_binding{};
     std::vector<u32> distribution_spirv;
+    // Draw-count compaction (EDEN_NX2_MESH_COMPACT): the mesh program also writes its
+    // per-workgroup emitted primitive counts to counts_binding, and the compaction pass
+    // after the dispatch turns them into indirect draw commands (compaction_spirv), so
+    // the draw rasterizes the emitted primitives instead of every workgroup's maximum.
+    bool compact{};
+    u32 counts_binding{};
+    std::vector<u32> compaction_spirv;
     // Output layout, for the readback diagnostics.
     u32 max_vertices{};
     u32 vertex_lines{};
@@ -257,6 +264,29 @@ public:
 
     [[nodiscard]] bool MeshEmulationHasTask() const noexcept {
         return mesh_emulation && mesh_emulation->has_task;
+    }
+
+    /// Draw-count compaction: the counts buffer the mesh program fills and the indirect
+    /// draw commands the compaction pass fills from them, with the counts' entry count.
+    void SetMeshEmulationCompactBuffers(const MeshEmulationBuffer& counts,
+                                        const MeshEmulationBuffer& commands,
+                                        u32 entries) noexcept {
+        mesh_compact_buffers = {counts, commands};
+        mesh_compact_entries = entries;
+    }
+
+    [[nodiscard]] bool MeshEmulationCompact() const noexcept {
+        return mesh_emulation && mesh_emulation->compact;
+    }
+
+    /// The compaction pass's indirect draw commands (MeshEmulationCompactBuffers).
+    [[nodiscard]] const MeshEmulationBuffer& MeshEmulationCommands() const noexcept {
+        return mesh_compact_buffers[1];
+    }
+
+    /// Counts entries the compaction pass covers; a task draw's command cap.
+    [[nodiscard]] u32 MeshEmulationCompactEntries() const noexcept {
+        return mesh_compact_entries;
     }
 
     [[nodiscard]] u32 MeshEmulationPayloadStride() const noexcept {
@@ -548,6 +578,15 @@ private:
     DescriptorAllocator distribution_allocator;
     std::array<MeshEmulationBuffer, 4> mesh_task_buffers{};
     u32 mesh_capacity{};
+    // Draw-count compaction: its pass (counts in, indirect draw commands out) and the
+    // per-draw buffers (counts, commands) with the counts' entry count.
+    vk::ShaderModule compaction_module;
+    vk::DescriptorSetLayout compaction_set_layout;
+    vk::PipelineLayout compaction_layout;
+    vk::Pipeline compaction_pipeline;
+    DescriptorAllocator compaction_allocator;
+    std::array<MeshEmulationBuffer, 2> mesh_compact_buffers{};
+    u32 mesh_compact_entries{};
 
     std::optional<PipelineBuild> build;
 };

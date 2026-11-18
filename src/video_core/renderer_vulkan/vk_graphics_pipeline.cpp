@@ -107,6 +107,9 @@ DescriptorLayoutBuilder MakeBuilder(const Device& device, std::span<const Shader
             builder.AddMeshEmulationOutput(mesh_emulation->offsets_binding);
             builder.AddMeshEmulationOutput(mesh_emulation->args_binding);
         }
+        if (mesh_emulation->compact) {
+            builder.AddMeshEmulationOutput(mesh_emulation->counts_binding);
+        }
     }
     return builder;
 }
@@ -528,8 +531,10 @@ GraphicsPipeline::GraphicsPipeline(
     uses_descriptor_buffer = !mesh_emulation && builder.CanUseDescriptorBuffer() &&
                              descriptor_buffer_ring.IsValid();
     // After every stage's descriptors: the output buffer, then with a task program its payload,
-    // offset and map buffers.
-    const u32 emulation_buffers{mesh_emulation ? (mesh_emulation->has_task ? 4U : 1U) : 0U};
+    // offset and map buffers; compaction adds the counts.
+    const u32 emulation_buffers{mesh_emulation ? (mesh_emulation->has_task ? 4U : 1U) +
+                                                     (mesh_emulation->compact ? 1U : 0U)
+                                               : 0U};
     num_descriptor_entries += emulation_buffers;
     descriptor_set_layout =
         builder.CreateDescriptorSetLayout(uses_push_descriptor, uses_descriptor_buffer);
@@ -604,6 +609,48 @@ GraphicsPipeline::GraphicsPipeline(
                                                              .storage_buffers = 4,
                                                              .score = 4,
                                                          });
+            }
+            if (mesh_emulation->compact) {
+                // The compaction pass: the counts (binding 0) become indirect draw
+                // commands (binding 1), plus its push constants
+                // (Shader::Backend::SPIRV::MeshEmulationCompactionConstants).
+                std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+                for (u32 binding = 0; binding < bindings.size(); ++binding) {
+                    bindings[binding] = {
+                        .binding = binding,
+                        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        .descriptorCount = 1,
+                        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                        .pImmutableSamplers = nullptr,
+                    };
+                }
+                compaction_set_layout = device.GetLogical().CreateDescriptorSetLayout({
+                    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .bindingCount = static_cast<u32>(bindings.size()),
+                    .pBindings = bindings.data(),
+                });
+                const VkDescriptorSetLayout compaction_set{*compaction_set_layout};
+                const VkPushConstantRange range{
+                    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .offset = 0,
+                    .size = sizeof(Shader::Backend::SPIRV::MeshEmulationCompactionConstants),
+                };
+                compaction_layout = device.GetLogical().CreatePipelineLayout({
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .setLayoutCount = 1,
+                    .pSetLayouts = &compaction_set,
+                    .pushConstantRangeCount = 1,
+                    .pPushConstantRanges = &range,
+                });
+                compaction_allocator = descriptor_pool.Allocator(
+                    device, scheduler, compaction_set, DescriptorBankInfo{
+                                                           .storage_buffers = 2,
+                                                           .score = 2,
+                                                       });
             }
         } else if (!uses_push_descriptor) {
             descriptor_allocator = descriptor_pool.Allocator(device, scheduler, set_layout,
@@ -1241,6 +1288,13 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                                                  task_buffer.size);
             }
         }
+        if (mesh_emulation->compact) {
+            const MeshEmulationBuffer& counts{mesh_compact_buffers[0]};
+            if (!counts.buffer) {
+                return false;
+            }
+            guest_descriptor_queue.AddBuffer(counts.buffer, counts.offset, counts.size);
+        }
     }
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();
@@ -1561,6 +1615,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         }()};
         scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
                           task_buffers = mesh_task_buffers,
+                          compact_buffers = mesh_compact_buffers,
+                          compact_entries = mesh_compact_entries,
                           output_buffer = mesh_output_buffer, output_offset = mesh_output_offset,
                           output_size = mesh_output_size, buffer_barriers = mesh_buffer_barriers,
                           rescaling_data = rescaling.Data(), is_rescaling = texture_cache.IsRescaling(),
@@ -1569,7 +1625,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             mesh_descriptor_set = VK_NULL_HANDLE;
             const bool has_task{mesh_emulation->has_task};
             if (!pipeline || !mesh_compute_pipeline || build->Failed() || groups == 0 ||
-                (has_task && (!task_compute_pipeline || !distribution_pipeline))) {
+                (has_task && (!task_compute_pipeline || !distribution_pipeline)) ||
+                (mesh_emulation->compact && !compaction_pipeline)) {
                 return;
             }
             const VkDescriptorSet descriptor_set{descriptor_allocator.Commit()};
@@ -1635,6 +1692,78 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                     barrier_for(task_buffers[2]);
                 }
             };
+            // Compaction (MeshEmulationSetup::compact): order the counts the mesh
+            // dispatch wrote for a compute read, turn them into indirect draw
+            // commands, and order those for the draw's indirect read. The draw
+            // itself is the rasterizer's (it owns the render pass that follows).
+            const auto run_compaction = [&] {
+                if (!buffer_barriers) {
+                    memory_barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+                } else {
+                    const VkBufferMemoryBarrier barrier{
+                        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .buffer = compact_buffers[0].buffer,
+                        .offset = compact_buffers[0].offset,
+                        .size = compact_buffers[0].size,
+                    };
+                    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, barrier);
+                }
+                const VkDescriptorSet compaction_set{compaction_allocator.Commit()};
+                std::array<VkDescriptorBufferInfo, 2> buffer_infos{};
+                std::array<VkWriteDescriptorSet, 2> writes{};
+                for (u32 binding = 0; binding < 2; ++binding) {
+                    buffer_infos[binding] = {
+                        .buffer = compact_buffers[binding].buffer,
+                        .offset = compact_buffers[binding].offset,
+                        .range = compact_buffers[binding].size,
+                    };
+                    writes[binding] = {
+                        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                        .pNext = nullptr,
+                        .dstSet = compaction_set,
+                        .dstBinding = binding,
+                        .dstArrayElement = 0,
+                        .descriptorCount = 1,
+                        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        .pImageInfo = nullptr,
+                        .pBufferInfo = &buffer_infos[binding],
+                        .pTexelBufferView = nullptr,
+                    };
+                }
+                device.GetLogical().UpdateDescriptorSets(writes, {});
+                const Shader::Backend::SPIRV::MeshEmulationCompactionConstants constants{
+                    .entries = compact_entries,
+                    .vertices_per_group = MeshEmulationVerticesPerGroup(),
+                    .corners = mesh_emulation->primitive_vertices,
+                };
+                cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *compaction_pipeline);
+                cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *compaction_layout, 0,
+                                          compaction_set, nullptr);
+                cmdbuf.PushConstants(*compaction_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                                     sizeof(constants), &constants);
+                cmdbuf.Dispatch((compact_entries + 63) / 64, 1, 1);
+                const VkBufferMemoryBarrier barrier{
+                    .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                    .dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .buffer = compact_buffers[1].buffer,
+                    .offset = compact_buffers[1].offset,
+                    .size = compact_buffers[1].size,
+                };
+                cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                       VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, barrier);
+            };
             // The scheduler orders earlier compute writes only before the next render pass
             // (COMPUTE -> ALL_GRAPHICS); these dispatches run before it, and the programs read
             // what the game's compute passes wrote (foliage instance lists, for one).
@@ -1646,6 +1775,9 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *mesh_compute_pipeline);
                 bind_program_state();
                 cmdbuf.Dispatch(groups, 1, 1);
+                if (mesh_emulation->compact) {
+                    run_compaction();
+                }
                 output_barrier();
                 return;
             }
@@ -1707,6 +1839,9 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *mesh_compute_pipeline);
             bind_program_state();
             cmdbuf.DispatchIndirect(task_buffers[2].buffer, task_buffers[2].offset);
+            if (mesh_emulation->compact) {
+                run_compaction();
+            }
             output_barrier();
         });
     }
@@ -1876,6 +2011,11 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
             distribution_module = BuildShader(device, mesh_emulation->distribution_spirv);
             distribution_pipeline =
                 make_compute(*distribution_module, *distribution_layout, nullptr, 3);
+        }
+        if (mesh_emulation->compact) {
+            compaction_module = BuildShader(device, mesh_emulation->compaction_spirv);
+            compaction_pipeline =
+                make_compute(*compaction_module, *compaction_layout, nullptr, 4);
         }
     }
     FixedPipelineState::DynamicState dynamic{};

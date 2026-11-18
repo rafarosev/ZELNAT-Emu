@@ -2348,6 +2348,9 @@ void EmitContext::DefineMeshEmulationOutput() {
             interfaces.push_back(mesh_group_index);
         }
     }
+    if (runtime_info.mesh_counts_binding != ~0U) {
+        mesh_counts_buffer = define(runtime_info.mesh_counts_binding, "mesh_emulation_counts");
+    }
 }
 
 void EmitContext::DefineOutputs(const IR::Program& program) {

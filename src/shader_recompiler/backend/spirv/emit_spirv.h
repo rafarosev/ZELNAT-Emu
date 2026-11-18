@@ -101,4 +101,18 @@ constexpr u32 MESH_EMULATION_ARGS_WORDS = 10;
 /// workgroups that do not fit are not dispatched.
 [[nodiscard]] std::vector<u32> EmitMeshEmulationDistribution(const Profile& profile);
 
+/// Compaction pass push constants: the counts buffer's entry count and the draw geometry
+/// the emulation vertex shader's index arithmetic assumes.
+struct MeshEmulationCompactionConstants {
+    u32 entries;            ///< workgroup counts in the counts buffer
+    u32 vertices_per_group; ///< draw vertices per mesh workgroup at the maximum count
+    u32 corners;            ///< vertices per primitive (MeshInfo::PrimitiveVertices())
+};
+/// Compaction pass after the mesh dispatch, set 0: the per-workgroup emitted primitive
+/// counts the mesh epilogue wrote (binding 0) become one VkDrawIndirectCommand each in
+/// the commands buffer (binding 1): vertex count = count * corners, first vertex =
+/// workgroup * vertices_per_group. The vertex shader is unchanged; only the emitted
+/// primitives of each workgroup are drawn.
+[[nodiscard]] std::vector<u32> EmitMeshEmulationCompaction(const Profile& profile);
+
 } // namespace Shader::Backend::SPIRV

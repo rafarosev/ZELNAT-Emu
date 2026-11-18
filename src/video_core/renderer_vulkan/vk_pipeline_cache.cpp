@@ -2862,15 +2862,26 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                         primitive_reason);
             return nullptr;
         }
+        // Draw-count compaction (EDEN_NX2_MESH_COMPACT, on unless =0): one more auxiliary
+        // buffer holds the mesh program's per-workgroup emitted counts. The task path's
+        // draw takes its count from the distribution pass, which needs
+        // vkCmdDrawIndirectCount; without it those pipelines keep the old draw.
+        static const bool mesh_compact_env{[] {
+            const char* const value{std::getenv("EDEN_NX2_MESH_COMPACT")};
+            return value == nullptr || value[0] != '0';
+        }()};
+        const bool mesh_compact{mesh_compact_env &&
+                                (!has_task || device.IsKhrDrawIndirectCountSupported())};
+        const u32 auxiliary_buffers{(has_task ? 4U : 1U) + (mesh_compact ? 1U : 0U)};
         // Task and mesh share the compute stage, including the fallback's storage buffers.
         // Shrink their arrays before counting resources and assigning auxiliary bindings.
         std::array<Shader::IR::Program*, 2> compute_programs{&programs[mesh_index], &programs[1]};
         Shader::Optimization::LimitSharedStageSampledTextureArrays(
             std::span{compute_programs.data(), has_task ? size_t{2} : size_t{1}}, host_info,
-            has_task ? 4U : 1U);
+            auxiliary_buffers);
         // Descriptor arrays occupy one binding, just as in DefineTextures and the layout builder.
         u32 output_binding{};
-        u32 compute_storage_buffers{has_task ? 4U : 1U};
+        u32 compute_storage_buffers{auxiliary_buffers};
         u32 compute_sampled_images{};
         u32 compute_samplers{};
         u32 compute_resources{compute_storage_buffers};
@@ -2925,6 +2936,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             mesh_emulation->args_binding = output_binding + 3;
             mesh_emulation->distribution_spirv =
                 Shader::Backend::SPIRV::EmitMeshEmulationDistribution(profile);
+        }
+        if (mesh_compact) {
+            // After the output (and the task buffers): the emitted counts.
+            mesh_emulation->compact = true;
+            mesh_emulation->counts_binding = output_binding + (has_task ? 4U : 1U);
+            mesh_emulation->compaction_spirv =
+                Shader::Backend::SPIRV::EmitMeshEmulationCompaction(profile);
         }
         mesh_emulation->block_words = Shader::Backend::SPIRV::MeshEmulationBlockWords(mesh.mesh);
         mesh_emulation->max_primitives = mesh.mesh.max_primitives;
@@ -3008,9 +3026,12 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
         }
         // The fallback binds its output buffer (and, for task draws, payload,
-        // offsets and indirect arguments) into the same descriptor set.
+        // offsets and indirect arguments; compaction adds the counts) into the
+        // same descriptor set.
         const size_t auxiliary_buffers{
-            mesh_emulation ? (mesh_emulation->has_task ? 4U : 1U) : 0U};
+            mesh_emulation
+                ? (mesh_emulation->has_task ? 4U : 1U) + (mesh_emulation->compact ? 1U : 0U)
+                : 0U};
         if (!FitsStorageBufferSetLimit(storage_buffers, auxiliary_buffers, set_limit)) {
             throw Shader::NotImplementedException(
                 "Binding {} storage buffers ({} for mesh fallback) to a descriptor set limited to {}",
@@ -3062,6 +3083,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                                program.stage == Shader::Stage::Task)) {
             runtime_info.mesh_as_compute = true;
             runtime_info.mesh_output_binding = mesh_emulation->output_binding;
+            if (mesh_emulation->compact) {
+                runtime_info.mesh_counts_binding = mesh_emulation->counts_binding;
+            }
             if (mesh_emulation->has_task) {
                 runtime_info.mesh_task_payload_binding = mesh_emulation->payload_binding;
                 runtime_info.mesh_task_offsets_binding = mesh_emulation->offsets_binding;

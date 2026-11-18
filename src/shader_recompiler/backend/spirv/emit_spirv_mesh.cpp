@@ -181,6 +181,13 @@ void ComputeMeshEpilogue(EmitContext& ctx) {
     const Id count{ctx.OpUMin(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.mesh_primitive_count),
                               ctx.Const(mesh.max_primitives))};
     const Id invocation{LocalInvocation(ctx)};
+    if (Sirit::ValidId(ctx.mesh_counts_buffer)) {
+        // Compaction (RuntimeInfo::mesh_counts_binding): lane 0 publishes the workgroup's
+        // emitted count, which the compaction pass turns into its indirect draw command.
+        If(ctx, ctx.OpIEqual(ctx.U1, invocation, ctx.u32_zero_value), [&] {
+            ctx.OpStore(BufferWord(ctx, ctx.mesh_counts_buffer, workgroup), count);
+        });
+    }
     const u32 threads{ctx.mesh_threads};
 
     // Vertex v, line l: output word v * vertex_lines + l, from the stage buffer's line groups.
@@ -865,6 +872,103 @@ std::vector<u32> EmitMeshEmulationDistribution(const Profile& profile) {
     module.OpFunctionEnd();
     module.AddEntryPoint(spv::ExecutionModel::GLCompute, main, "main", interfaces);
     module.AddExecutionMode(main, spv::ExecutionMode::LocalSize, 1U, 1U, 1U);
+    return module.Assemble();
+}
+
+std::vector<u32> EmitMeshEmulationCompaction(const Profile& profile) {
+    Sirit::Module module{profile.supported_spirv};
+    module.AddCapability(spv::Capability::Shader);
+    module.SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
+    module.AddExtension("SPV_KHR_storage_buffer_storage_class");
+
+    const Id void_type{module.TypeVoid()};
+    const Id bool_type{module.TypeBool()};
+    const Id u32_type{module.TypeInt(32, false)};
+    const auto constant = [&](u32 value) { return module.Constant(u32_type, value); };
+
+    const Id array_type{module.TypeRuntimeArray(u32_type)};
+    module.Decorate(array_type, spv::Decoration::ArrayStride, 4U);
+    const Id struct_type{module.TypeStruct(array_type)};
+    module.Decorate(struct_type, spv::Decoration::Block);
+    module.MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
+    const Id buffer_pointer{module.TypePointer(spv::StorageClass::StorageBuffer, struct_type)};
+    const Id buffer_u32{module.TypePointer(spv::StorageClass::StorageBuffer, u32_type)};
+    std::vector<Id> interfaces;
+    const auto define_buffer = [&](u32 binding, std::string_view name) {
+        const Id buffer{module.AddGlobalVariable(buffer_pointer, spv::StorageClass::StorageBuffer)};
+        module.Decorate(buffer, spv::Decoration::Binding, binding);
+        module.Decorate(buffer, spv::Decoration::DescriptorSet, 0U);
+        module.Name(buffer, name);
+        interfaces.push_back(buffer);
+        return buffer;
+    };
+    const Id counts{define_buffer(0, "counts")};
+    const Id commands{define_buffer(1, "commands")};
+
+    constexpr u32 num_constants{sizeof(MeshEmulationCompactionConstants) / sizeof(u32)};
+    std::array<Id, num_constants> members;
+    members.fill(u32_type);
+    const Id constants_type{module.TypeStruct(std::span<const Id>(members))};
+    module.Decorate(constants_type, spv::Decoration::Block);
+    for (u32 member = 0; member < num_constants; ++member) {
+        module.MemberDecorate(constants_type, spv::Decoration::Offset, member * 4);
+    }
+    const Id constants{module.AddGlobalVariable(
+        module.TypePointer(spv::StorageClass::PushConstant, constants_type),
+        spv::StorageClass::PushConstant)};
+    interfaces.push_back(constants);
+    const Id constant_u32{module.TypePointer(spv::StorageClass::PushConstant, u32_type)};
+
+    const Id vec3_type{module.TypeVector(u32_type, 3)};
+    const Id invocation_id{module.AddGlobalVariable(
+        module.TypePointer(spv::StorageClass::Input, vec3_type), spv::StorageClass::Input)};
+    module.Decorate(invocation_id, spv::Decoration::BuiltIn, spv::BuiltIn::GlobalInvocationId);
+    interfaces.push_back(invocation_id);
+    if (profile.supported_spirv < 0x00010400) {
+        interfaces.clear(); // only Input and Output variables before SPIR-V 1.4
+    }
+
+    const auto word = [&](Id buffer, Id index) {
+        return module.OpAccessChain(buffer_u32, buffer, constant(0), index);
+    };
+    const Id main{module.OpFunction(void_type, spv::FunctionControlMask::MaskNone,
+                                    module.TypeFunction(void_type))};
+    module.AddLabel();
+    const auto push = [&](u32 member) {
+        return module.OpLoad(u32_type, module.OpAccessChain(constant_u32, constants,
+                                                            constant(member)));
+    };
+    const Id entries{push(0)};
+    const Id vertices_per_group{push(1)};
+    const Id corners{push(2)};
+    const Id group{module.OpCompositeExtract(
+        u32_type, module.OpLoad(vec3_type, invocation_id), 0U)};
+
+    // if (group < entries) { commands[group] = {count * corners, 1, group * vpg, 0}; }
+    // Entries past the mesh dispatch's workgroup count (a task draw's arena bound) are
+    // written but never drawn: the draw's count comes from the distribution pass.
+    const Id then_label{module.OpLabel()};
+    const Id merge_label{module.OpLabel()};
+    module.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    module.OpBranchConditional(module.OpULessThan(bool_type, group, entries), then_label,
+                               merge_label);
+    module.AddLabel(then_label);
+    {
+        const Id count{module.OpLoad(u32_type, word(counts, group))};
+        const Id base{module.OpIMul(u32_type, group, constant(4))};
+        module.OpStore(word(commands, base),
+                       module.OpIMul(u32_type, count, corners));
+        module.OpStore(word(commands, module.OpIAdd(u32_type, base, constant(1))), constant(1));
+        module.OpStore(word(commands, module.OpIAdd(u32_type, base, constant(2))),
+                       module.OpIMul(u32_type, group, vertices_per_group));
+        module.OpStore(word(commands, module.OpIAdd(u32_type, base, constant(3))), constant(0));
+    }
+    module.OpBranch(merge_label);
+    module.AddLabel(merge_label);
+    module.OpReturn();
+    module.OpFunctionEnd();
+    module.AddEntryPoint(spv::ExecutionModel::GLCompute, main, "main", interfaces);
+    module.AddExecutionMode(main, spv::ExecutionMode::LocalSize, 64U, 1U, 1U);
     return module.Assemble();
 }
 

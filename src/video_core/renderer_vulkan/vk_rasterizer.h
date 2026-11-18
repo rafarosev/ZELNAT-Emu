@@ -393,6 +393,14 @@ private:
         VkBuffer buffer{};
         VkDeviceSize offset{};
     } mesh_emulation_indirect;
+    /// Draw-count compaction: the commands buffer the compaction pass writes, whether
+    /// this draw uses it, and the counts entries (a task draw's command cap).
+    struct {
+        VkBuffer buffer{};
+        VkDeviceSize offset{};
+    } mesh_emulation_compact_commands;
+    bool mesh_emulation_compact{};
+    u32 mesh_emulation_compact_entries{};
     /// Mesh emulation diagnostics: one draw's output, read back once the GPU has written it.
     struct MeshEmulationProbe {
         std::span<const u8> data;

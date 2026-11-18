@@ -1112,6 +1112,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     // dispatch and drawn as groups * vertices-per-group triangle list vertices.
     mesh_emulation_groups = 0;
     mesh_emulation_vertices_per_group = 0;
+    mesh_emulation_compact = false;
+    mesh_emulation_compact_entries = 0;
     if (emulated_mesh) {
         // The same group count the native path hands vkCmdDrawMeshTasksEXT (MakeDrawParams:
         // the index count for indexed draws), within the device's dispatch limit.
@@ -1169,6 +1171,21 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                 bytes, probe_draw ? MemoryUsage::Download : MemoryUsage::DeviceLocal, true);
             mesh_draw_buffers.push_back(output);
             pipeline->SetMeshEmulationOutput(output.buffer, output.offset, bytes, groups);
+            if (pipeline->MeshEmulationCompact() && groups != 0) {
+                // Compaction: one count per workgroup, one indirect command per count.
+                const StagingBufferRef counts{staging_pool.Request(
+                    u64{groups} * 4, MemoryUsage::DeviceLocal, true)};
+                mesh_draw_buffers.push_back(counts);
+                const StagingBufferRef commands{staging_pool.Request(
+                    u64{groups} * 16, MemoryUsage::DeviceLocal, true)};
+                mesh_draw_buffers.push_back(commands);
+                pipeline->SetMeshEmulationCompactBuffers(
+                    {counts.buffer, counts.offset, u64{groups} * 4},
+                    {commands.buffer, commands.offset, u64{groups} * 16}, groups);
+                mesh_emulation_compact_commands = {commands.buffer, commands.offset};
+                mesh_emulation_compact = true;
+                mesh_emulation_compact_entries = groups;
+            }
         }
         mesh_emulation_indirect = {};
         if (mesh_task_probe.pending && scheduler.IsFree(mesh_task_probe.tick)) {
@@ -1216,6 +1233,22 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             pipeline->SetMeshEmulationTaskBuffers(
                 payload, offsets, args, {*arena.counter, 0, sizeof(u32)}, capacity_words);
             mesh_emulation_indirect = {args.buffer, args.offset};
+            if (pipeline->MeshEmulationCompact()) {
+                // The distribution pass dispatches at most the arena's group capacity
+                // (and the device's dispatch limit); the counts cover that bound and
+                // the draw takes its count from the pass, so entries past the
+                // dispatched workgroups are written but never drawn.
+                const u32 entries{(std::min)(capacity_words / pipeline->MeshEmulation()->block_words,
+                                             device.GetMaxComputeWorkGroupCount()[0])};
+                if (entries != 0) {
+                    const auto counts{request(u64{entries} * 4).first};
+                    const auto commands{request(u64{entries} * 16).first};
+                    pipeline->SetMeshEmulationCompactBuffers(counts, commands, entries);
+                    mesh_emulation_compact_commands = {commands.buffer, commands.offset};
+                    mesh_emulation_compact = true;
+                    mesh_emulation_compact_entries = entries;
+                }
+            }
         }
         if (probe_draw && output.mapped_span.size() >= output.offset + bytes) {
             const MeshEmulationSetup& setup{*pipeline->MeshEmulation()};
@@ -1713,6 +1746,34 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         if (mesh_draw && mesh_emulation_vertices_per_group != 0) {
             const u32 vertices{mesh_emulation_groups * mesh_emulation_vertices_per_group};
             if (vertices == 0) {
+                return;
+            }
+            if (mesh_emulation_compact) {
+                // Compaction: one indirect command per workgroup, covering only its
+                // emitted primitives. With a task program the command count is the
+                // distribution pass's dispatched count (its arguments word 0).
+                if (mesh_emulation_indirect.buffer) {
+                    scheduler.Record([this, commands = mesh_emulation_compact_commands,
+                                      indirect = mesh_emulation_indirect,
+                                      entries = mesh_emulation_compact_entries](
+                                         vk::CommandBuffer cmdbuf) {
+                        if (scheduler.GraphicsPipelineMissing()) {
+                            return;
+                        }
+                        cmdbuf.DrawIndirectCount(commands.buffer, commands.offset, indirect.buffer,
+                                                 indirect.offset, entries,
+                                                 sizeof(VkDrawIndirectCommand));
+                    });
+                } else {
+                    scheduler.Record([this, commands = mesh_emulation_compact_commands,
+                                      groups = mesh_emulation_groups](vk::CommandBuffer cmdbuf) {
+                        if (scheduler.GraphicsPipelineMissing()) {
+                            return;
+                        }
+                        cmdbuf.DrawIndirect(commands.buffer, commands.offset, groups,
+                                            sizeof(VkDrawIndirectCommand));
+                    });
+                }
                 return;
             }
             if (mesh_emulation_indirect.buffer) {

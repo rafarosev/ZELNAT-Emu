@@ -911,7 +911,7 @@ std::vector<u32> EmitMeshEmulationCompaction(const Profile& profile) {
     const Id constants_type{module.TypeStruct(std::span<const Id>(members))};
     module.Decorate(constants_type, spv::Decoration::Block);
     for (u32 member = 0; member < num_constants; ++member) {
-        module.MemberDecorate(constants_type, spv::Decoration::Offset, member * 4);
+        module.MemberDecorate(constants_type, member, spv::Decoration::Offset, member * 4);
     }
     const Id constants{module.AddGlobalVariable(
         module.TypePointer(spv::StorageClass::PushConstant, constants_type),

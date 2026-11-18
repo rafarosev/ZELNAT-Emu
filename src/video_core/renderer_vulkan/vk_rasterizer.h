@@ -433,7 +433,8 @@ private:
     /// Mesh emulation: the draw's staging buffers, held until its commands are recorded.
     /// Configure can submit (an ASTC decode, a full descriptor buffer ring), so the tick when
     /// they were requested may be older than the submission that writes them.
-    boost::container::static_vector<StagingBufferRef, 4> mesh_draw_buffers;
+    /// Capacity covers the task path with compaction: payload, offsets, args, counts, commands.
+    boost::container::static_vector<StagingBufferRef, 6> mesh_draw_buffers;
     bool mesh_arena_used{};
     void ReleaseMeshEmulationBuffers();
 

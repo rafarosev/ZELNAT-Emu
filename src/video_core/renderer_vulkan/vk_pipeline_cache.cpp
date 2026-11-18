@@ -2627,12 +2627,14 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::RebuildGraphicsPipeline(KeptGra
         }
         return code;
     };
+    const u64 mesh_native_key{kept.mesh_native_key};
     auto pipeline = std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, pipeline_binaries.get(),
         &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
         BuildQueue(true, bytes), nullptr, render_pass_cache, graphics_key,
         std::array<std::vector<u32>, Maxwell::MaxShaderStage>{}, infos, std::move(emit),
         std::move(kept.mesh_emulation));
+    pipeline->SetMeshNativeKey(mesh_native_key);
     pipeline->SetMappedPointers(std::move(kept.mapped_pointers));
     return pipeline;
 }
@@ -2683,6 +2685,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     }
     size_t env_index{0};
     std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
+    u64 mesh_native_key{};
     const bool uses_vertex_a{key.unique_hashes[0] != 0};
     const bool uses_vertex_b{key.unique_hashes[1] != 0};
 
@@ -2704,6 +2707,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
         Shader::Environment& env{*envs[env_index]};
         ++env_index;
+        if (env.ShaderStage() == Shader::Stage::Mesh) {
+            mesh_native_key = env.NativeKey();
+        }
         if (index == static_cast<size_t>(Maxwell::ShaderType::Geometry) &&
             !device.IsGeometryShaderSupported() && env.IsNativeProgram()) {
             // A native (Switch 2) geometry program on a device without geometry shaders: the
@@ -3190,6 +3196,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         BuildQueue(build_in_parallel, defer_emission ? deferred_ir_bytes : 0), statistics,
         render_pass_cache, key, std::move(stage_spirv), infos, std::move(emit_stages),
         std::move(mesh_emulation));
+    pipeline->SetMeshNativeKey(mesh_native_key);
     pipeline->SetMappedPointers(std::move(mapped_pointers));
     return pipeline;
 

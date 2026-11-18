@@ -129,6 +129,7 @@ struct KeptGraphicsStages {
     std::array<std::vector<u8>, NUM_STAGES> spirv; ///< zstd, empty for absent stages
     std::array<std::unique_ptr<Shader::Info>, NUM_STAGES> infos;
     std::optional<MeshEmulationSetup> mesh_emulation;
+    u64 mesh_native_key{};
     VideoCommon::EvictedPointerSlots::Slots mapped_pointers;
 
     /// Memory it holds, roughly
@@ -235,6 +236,26 @@ public:
     /// The emulation's setup (output layout), or null.
     [[nodiscard]] const MeshEmulationSetup* MeshEmulation() const noexcept {
         return mesh_emulation ? &*mesh_emulation : nullptr;
+    }
+
+    /// The mesh program's unique hash (its graphics key entry), or 0 when this pipeline
+    /// has no mesh program.
+    [[nodiscard]] u64 MeshProgramHash() const noexcept {
+        for (size_t stage = 0; stage + 1 < NUM_STAGES; ++stage) {
+            if (stage_infos[stage].is_mesh) {
+                return key.unique_hashes[stage + 1];
+            }
+        }
+        return 0;
+    }
+
+    /// The mesh program's native instruction key (Shader::Environment::NativeKey), set by
+    /// the pipeline cache when the program was lowered from guest code; 0 otherwise.
+    void SetMeshNativeKey(u64 native_key) noexcept {
+        mesh_native_key = native_key;
+    }
+    [[nodiscard]] u64 MeshNativeKey() const noexcept {
+        return mesh_native_key;
     }
 
     /// The emulation's output buffer and workgroup count for the next Configure.
@@ -561,6 +582,7 @@ private:
 
     // Mesh emulation (MeshEmulationSetup).
     std::optional<MeshEmulationSetup> mesh_emulation;
+    u64 mesh_native_key{};
     vk::ShaderModule mesh_vertex_module;
     vk::Pipeline mesh_compute_pipeline;
     VkDescriptorSet mesh_descriptor_set{}; ///< shared by the dispatch and the draw it feeds

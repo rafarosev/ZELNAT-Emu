@@ -89,6 +89,10 @@ public:
         return lowered_native;
     }
 
+    [[nodiscard]] u64 NativeKey() const override {
+        return lowered_native ? lowered_native->native_program_key : 0;
+    }
+
     /// The v2 cache record of the native program this environment lowered, once
     [[nodiscard]] std::shared_ptr<const ShaderCacheV2::ProgramRecord> TakeProgramRecord() noexcept {
         return std::move(program_record);

@@ -969,6 +969,132 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
     return true;
 }
 
+namespace {
+
+/// BananaNative's Ocarina of Time foliage mesh programs (dm/games/0400486024DEC000/game.tsv
+/// mesh_vegetation_cut rows, tuples from its shader facts): their key, max vertices, max
+/// primitives. Their keys are the first 8 bytes of SHA-256 over the shader's NVN2 control
+/// section and code area. This emulator never sees the control section and hashes the
+/// lowered code (CityHash64) and the raw instructions (FNV-1a) instead, so the keys cannot
+/// match a draw here; the tuples annotate the discovery log below.
+struct FoliageProgram {
+    u64 banana_key;
+    u32 max_vertices;
+    u32 max_primitives;
+};
+constexpr std::array<FoliageProgram, 14> FoliagePrograms{{
+    {0x0c1ffecd02018fb0ULL, 96, 64},  {0xeed1add7c89f5d34ULL, 96, 64},
+    {0x25c4a740753e7d7aULL, 96, 64},  {0x73dc0b90c4082e43ULL, 96, 64},
+    {0x101ecb327aafe9b1ULL, 96, 64},  {0x17c8ab6419068d4bULL, 96, 64},
+    {0x5b737961ae3e1b10ULL, 128, 64}, {0xecead5cd0569091fULL, 128, 64},
+    {0xeebdb9347d09b344ULL, 128, 64}, {0x604134a5262ff670ULL, 128, 64},
+    {0xd98076e4148db34fULL, 128, 64}, {0xfed302d791a4ba43ULL, 128, 64},
+    {0x839241636fce850aULL, 160, 128}, {0x4c7d6be5a7717c8dULL, 160, 128},
+}};
+
+/// Unique hashes (this emulator's space) of the mesh programs the vegetation cut skips.
+/// Empty until a discovery run (EDEN_NX2_VEGETATION_LOG=1) identifies the foliage programs
+/// above in this space; never fill it from BananaNative's keys.
+constexpr std::array<u64, 0> VegetationCutHashes{};
+
+/// EDEN_NX2_VEGETATION, BananaNative's DM_VK_VEGETATION semantics: unset is full
+/// vegetation (1); 0 cuts.
+bool VegetationCutRequested() {
+    static const bool requested{[] {
+        const char* const value{std::getenv("EDEN_NX2_VEGETATION")};
+        return value != nullptr && value[0] != '\0' && std::strtod(value, nullptr) == 0.0;
+    }()};
+    return requested;
+}
+
+/// EDEN_NX2_VEGETATION_LOG=1: log every distinct mesh program drawn, with the facts that
+/// identify it against the foliage table above.
+bool VegetationLogRequested() {
+    static const bool requested{std::getenv("EDEN_NX2_VEGETATION_LOG") != nullptr};
+    return requested;
+}
+
+void NoteVegetationDraw(GraphicsPipeline* pipeline) {
+    if (!VegetationLogRequested()) {
+        return;
+    }
+    struct Seen {
+        u64 hash{};
+        u64 draws{};
+    };
+    static std::array<Seen, 256> seen{};
+    static size_t seen_count{};
+    const u64 hash{pipeline->MeshProgramHash()};
+    size_t index{0};
+    while (index < seen_count && seen[index].hash != hash) {
+        ++index;
+    }
+    if (index == seen_count) {
+        if (seen_count == seen.size()) {
+            return;
+        }
+        seen[seen_count++] = {hash, 0};
+        const MeshEmulationSetup* const setup{pipeline->MeshEmulation()};
+        const u32 max_vertices{setup ? setup->max_vertices : 0};
+        const u32 max_primitives{setup ? setup->max_primitives : 0};
+        std::string candidates;
+        for (const FoliageProgram& foliage : FoliagePrograms) {
+            if (max_vertices != 0 && foliage.max_vertices == max_vertices &&
+                foliage.max_primitives == max_primitives) {
+                candidates += fmt::format(" {:016x}", foliage.banana_key);
+            }
+        }
+        const std::string note{
+            candidates.empty()
+                ? std::string{}
+                : fmt::format(" (tuple matches BananaNative foliage:{})", candidates)};
+        LOG_INFO(Render_Vulkan,
+                 "Vegetation log: mesh {:016x} native {:016x} max_vertices {} max_primitives "
+                 "{} fragment {:016x}{}",
+                 hash, pipeline->MeshNativeKey(), max_vertices, max_primitives,
+                 pipeline->ShaderHashes()[5], note);
+    }
+    if (++seen[index].draws % 4096 == 0) {
+        LOG_INFO(Render_Vulkan, "Vegetation log: mesh {:016x} drawn {} times", hash,
+                 seen[index].draws);
+    }
+}
+
+bool VegetationCutApplies(GraphicsPipeline* pipeline) {
+    if (!VegetationCutRequested() || Settings::GetCurrentProgramID() != 0x0400486024DEC000ULL) {
+        return false;
+    }
+    if (VegetationCutHashes.empty()) {
+        static bool logged{};
+        if (!logged) {
+            logged = true;
+            LOG_WARNING(Render_Vulkan,
+                        "Vegetation cut requested (EDEN_NX2_VEGETATION=0) but no mesh program "
+                        "is identified yet; run with EDEN_NX2_VEGETATION_LOG=1 to identify "
+                        "the foliage programs");
+        }
+        return false;
+    }
+    const u64 hash{pipeline->MeshProgramHash()};
+    if (hash == 0 ||
+        std::ranges::find(VegetationCutHashes, hash) == VegetationCutHashes.end()) {
+        return false;
+    }
+    // BananaNative refuses the cut when any stage's bindings can write guest memory, or
+    // transform feedback is on. WritesStorage covers every stage's written storage
+    // buffers and images and its global-memory stores.
+    if (pipeline->WritesStorage() || pipeline->Key().state.xfb_enabled != 0) {
+        return false;
+    }
+    static u64 omitted{};
+    if (++omitted == 1 || omitted % 4096 == 0) {
+        LOG_INFO(Render_Vulkan, "Vegetation cut: {} mesh draws omitted", omitted);
+    }
+    return true;
+}
+
+} // Anonymous namespace
+
 /// Common start of every draw: resolves the pipeline and the bound resources, then calls
 /// `draw_func` to record the draw itself. A draw that cannot be prepared is skipped and logged.
 template <typename Func>
@@ -1107,6 +1233,13 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                                        : "no VK_EXT_mesh_shader");
         TraceRenderState(is_indexed, "mesh-skipped", nullptr);
         return;
+    }
+    if (mesh_draw) {
+        NoteVegetationDraw(pipeline);
+        if (VegetationCutApplies(pipeline)) {
+            TraceRenderState(is_indexed, "vegetation-cut", nullptr);
+            return;
+        }
     }
     // Mesh emulation: one output block per mesh workgroup, written by the pipeline's compute
     // dispatch and drawn as groups * vertices-per-group triangle list vertices.

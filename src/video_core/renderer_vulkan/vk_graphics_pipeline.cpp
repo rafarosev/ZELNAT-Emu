@@ -765,6 +765,7 @@ KeptGraphicsStages GraphicsPipeline::TakeKeptStages() {
     KeptGraphicsStages kept{
         .spirv = std::move(kept_spirv),
         .mesh_emulation = mesh_emulation,
+        .mesh_native_key = mesh_native_key,
         .mapped_pointers = mapped_pointers,
     };
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {

@@ -2353,6 +2353,44 @@ void ReportUnsupportedMeshPipeline(const GraphicsPipelineCacheKey& key, const Pr
                 position, generic, other, others, info.primitive_lines.size(), primitive_attributes,
                 has_pixel, with_task, per_primitive, non_triangle);
 }
+
+/// Vegetation-cut classification of a mesh program, from the same declared geometry the
+/// survey above reports. BananaNative's verified Ocarina of Time foliage programs (the
+/// FoliagePrograms table in vk_rasterizer.cpp) all run a 32-thread workgroup and declare
+/// one of three output sizes — 96 vertices / 64 primitives, 128 / 64, or 160 / 128 — while
+/// the game's other mesh programs declare different sizes, so the size is a real signature
+/// in this game's program population. Within that set the outputs split in two: programs
+/// writing position plus at most seven generic lines have the foliage cards' shape
+/// (position, a normal, a UV set, a colour); the rest write many more varyings or
+/// per-primitive attributes and are only cut by the aggressive tier.
+VegetationClass ClassifyVegetation(const Shader::IR::Program& program) {
+    const auto& mesh{program.mesh};
+    if (mesh.topology != 4 || program.workgroup_size[0] != 32 ||
+        program.workgroup_size[1] != 1 || program.workgroup_size[2] != 1) {
+        return VegetationClass::None;
+    }
+    const bool foliage_size{(mesh.max_vertices == 96 && mesh.max_primitives == 64) ||
+                            (mesh.max_vertices == 128 && mesh.max_primitives == 64) ||
+                            (mesh.max_vertices == 160 && mesh.max_primitives == 128)};
+    if (!foliage_size) {
+        return VegetationClass::None;
+    }
+    u32 generic{};
+    u32 other{};
+    for (const u32 line : mesh.vertex_lines) {
+        const auto attribute{static_cast<Shader::IR::Attribute>(line)};
+        if (Shader::IR::IsGeneric(attribute)) {
+            ++generic;
+        } else if (attribute < Shader::IR::Attribute::PositionX ||
+                   attribute > Shader::IR::Attribute::PositionW) {
+            ++other;
+        }
+    }
+    if (other != 0 || !mesh.primitive_lines.empty() || generic > 7) {
+        return VegetationClass::FoliageExtended;
+    }
+    return VegetationClass::Foliage;
+}
 } // Anonymous namespace
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
@@ -2635,6 +2673,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::RebuildGraphicsPipeline(KeptGra
         std::array<std::vector<u32>, Maxwell::MaxShaderStage>{}, infos, std::move(emit),
         std::move(kept.mesh_emulation));
     pipeline->SetMeshNativeKey(mesh_native_key);
+    pipeline->SetVegetationClass(kept.vegetation_class);
     pipeline->SetMappedPointers(std::move(kept.mapped_pointers));
     return pipeline;
 }
@@ -3190,6 +3229,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             mapped_pointers[index] = envs[mapped_env++]->MappedStoragePointerKeys();
         }
     }
+    VegetationClass vegetation_class{VegetationClass::None};
+    for (size_t index = 1; index < Maxwell::MaxShaderProgram; ++index) {
+        if (key.unique_hashes[index] != 0 && programs[index].stage == Shader::Stage::Mesh) {
+            vegetation_class = ClassifyVegetation(programs[index]);
+            break;
+        }
+    }
     auto pipeline = std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, pipeline_binaries.get(),
         &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
@@ -3197,6 +3243,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         render_pass_cache, key, std::move(stage_spirv), infos, std::move(emit_stages),
         std::move(mesh_emulation));
     pipeline->SetMeshNativeKey(mesh_native_key);
+    pipeline->SetVegetationClass(vegetation_class);
     pipeline->SetMappedPointers(std::move(mapped_pointers));
     return pipeline;
 

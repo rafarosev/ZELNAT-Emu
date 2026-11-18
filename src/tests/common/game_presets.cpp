@@ -38,7 +38,7 @@ TEST_CASE("Ocarina of Time Intel-low preset applies only when accepted for OoT",
                                                      Settings::OcarinaOfTimeProgramId, true));
     CHECK(settings->renderer_backend.GetValue() == Settings::RendererBackend::Vulkan);
     CHECK(settings->cpu_accuracy.GetValue() == Settings::CpuAccuracy::Unsafe);
-    CHECK(settings->resolution_setup.GetValue() == Settings::ResolutionSetup::Res1_2X);
+    CHECK(settings->resolution_setup.GetValue() == Settings::ResolutionSetup::Res1_10X);
     CHECK(settings->gpu_accuracy.GetValue() == Settings::GpuAccuracy::Low);
     CHECK(settings->use_asynchronous_shaders.GetValue());
     CHECK(settings->astc_recompression.GetValue() == Settings::AstcRecompression::Bc3);

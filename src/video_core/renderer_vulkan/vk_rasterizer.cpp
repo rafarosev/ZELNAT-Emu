@@ -976,7 +976,8 @@ namespace {
 /// primitives. Their keys are the first 8 bytes of SHA-256 over the shader's NVN2 control
 /// section and code area. This emulator never sees the control section and hashes the
 /// lowered code (CityHash64) and the raw instructions (FNV-1a) instead, so the keys cannot
-/// match a draw here; the tuples annotate the discovery log below.
+/// match a draw here; the tuples annotate the discovery log below and are the output-size
+/// signature ClassifyVegetation (vk_pipeline_cache.cpp) cuts on.
 struct FoliageProgram {
     u64 banana_key;
     u32 max_vertices;
@@ -992,19 +993,29 @@ constexpr std::array<FoliageProgram, 14> FoliagePrograms{{
     {0x839241636fce850aULL, 160, 128}, {0x4c7d6be5a7717c8dULL, 160, 128},
 }};
 
-/// Unique hashes (this emulator's space) of the mesh programs the vegetation cut skips.
-/// Empty until a discovery run (EDEN_NX2_VEGETATION_LOG=1) identifies the foliage programs
-/// above in this space; never fill it from BananaNative's keys.
-constexpr std::array<u64, 0> VegetationCutHashes{};
+/// EDEN_NX2_VEGETATION tiers for Ocarina of Time. The cut ships on: unset is the standard
+/// tier (foliage-signature programs with simple vertex outputs), 0 is the aggressive tier
+/// (the whole foliage output-size set), and any other value (BananaNative's 1 included)
+/// restores full vegetation. Which programs belong to the signature is decided at pipeline
+/// creation by ClassifyVegetation (vk_pipeline_cache.cpp), from the output sizes above:
+/// BananaNative's keys cannot be matched here (different hash space), their declared
+/// geometry can.
+enum class VegetationTier {
+    Full,
+    Standard,
+    Aggressive,
+};
 
-/// EDEN_NX2_VEGETATION, BananaNative's DM_VK_VEGETATION semantics: unset is full
-/// vegetation (1); 0 cuts.
-bool VegetationCutRequested() {
-    static const bool requested{[] {
+VegetationTier GetVegetationTier() {
+    static const VegetationTier tier{[] {
         const char* const value{std::getenv("EDEN_NX2_VEGETATION")};
-        return value != nullptr && value[0] != '\0' && std::strtod(value, nullptr) == 0.0;
+        if (value == nullptr || value[0] == '\0') {
+            return VegetationTier::Standard;
+        }
+        return std::strtod(value, nullptr) == 0.0 ? VegetationTier::Aggressive
+                                                  : VegetationTier::Full;
     }()};
-    return requested;
+    return tier;
 }
 
 /// EDEN_NX2_VEGETATION_LOG=1: log every distinct mesh program drawn, with the facts that
@@ -1048,11 +1059,17 @@ void NoteVegetationDraw(GraphicsPipeline* pipeline) {
             candidates.empty()
                 ? std::string{}
                 : fmt::format(" (tuple matches BananaNative foliage:{})", candidates)};
+        const VegetationClass vegetation_class{pipeline->GetVegetationClass()};
+        const char* const class_name{vegetation_class == VegetationClass::Foliage
+                                         ? "foliage"
+                                     : vegetation_class == VegetationClass::FoliageExtended
+                                         ? "foliage-extended"
+                                         : "none"};
         LOG_INFO(Render_Vulkan,
                  "Vegetation log: mesh {:016x} native {:016x} max_vertices {} max_primitives "
-                 "{} fragment {:016x}{}",
+                 "{} fragment {:016x} class {}{}",
                  hash, pipeline->MeshNativeKey(), max_vertices, max_primitives,
-                 pipeline->ShaderHashes()[5], note);
+                 pipeline->ShaderHashes()[5], class_name, note);
     }
     if (++seen[index].draws % 4096 == 0) {
         LOG_INFO(Render_Vulkan, "Vegetation log: mesh {:016x} drawn {} times", hash,
@@ -1061,23 +1078,16 @@ void NoteVegetationDraw(GraphicsPipeline* pipeline) {
 }
 
 bool VegetationCutApplies(GraphicsPipeline* pipeline) {
-    if (!VegetationCutRequested() || Settings::GetCurrentProgramID() != 0x0400486024DEC000ULL) {
+    const VegetationTier tier{GetVegetationTier()};
+    if (tier == VegetationTier::Full ||
+        Settings::GetCurrentProgramID() != 0x0400486024DEC000ULL) {
         return false;
     }
-    if (VegetationCutHashes.empty()) {
-        static bool logged{};
-        if (!logged) {
-            logged = true;
-            LOG_WARNING(Render_Vulkan,
-                        "Vegetation cut requested (EDEN_NX2_VEGETATION=0) but no mesh program "
-                        "is identified yet; run with EDEN_NX2_VEGETATION_LOG=1 to identify "
-                        "the foliage programs");
-        }
-        return false;
-    }
-    const u64 hash{pipeline->MeshProgramHash()};
-    if (hash == 0 ||
-        std::ranges::find(VegetationCutHashes, hash) == VegetationCutHashes.end()) {
+    const VegetationClass vegetation_class{pipeline->GetVegetationClass()};
+    const bool in_tier{vegetation_class == VegetationClass::Foliage ||
+                       (tier == VegetationTier::Aggressive &&
+                        vegetation_class == VegetationClass::FoliageExtended)};
+    if (!in_tier) {
         return false;
     }
     // BananaNative refuses the cut when any stage's bindings can write guest memory, or

@@ -122,6 +122,14 @@ struct MeshEmulationSetup {
     std::array<u32, 4> position_lines{~0U, ~0U, ~0U, ~0U}; ///< line of PositionX..W
 };
 
+/// Vegetation-cut classification of a pipeline's mesh program, computed by the pipeline
+/// cache from the program's declared geometry (see ClassifyVegetation in vk_pipeline_cache.cpp).
+enum class VegetationClass : u8 {
+    None,           ///< not an Ocarina of Time foliage-shaped mesh program
+    Foliage,        ///< foliage signature with simple vertex outputs; cut by the standard tier
+    FoliageExtended, ///< foliage output size but rich outputs; cut only by the aggressive tier
+};
+
 /// What an evicted graphics pipeline needs to be built again without translating its shaders
 struct KeptGraphicsStages {
     static constexpr size_t NUM_STAGES = Tegra::Engines::Maxwell3D::Regs::MaxShaderStage;
@@ -130,6 +138,7 @@ struct KeptGraphicsStages {
     std::array<std::unique_ptr<Shader::Info>, NUM_STAGES> infos;
     std::optional<MeshEmulationSetup> mesh_emulation;
     u64 mesh_native_key{};
+    VegetationClass vegetation_class{VegetationClass::None};
     VideoCommon::EvictedPointerSlots::Slots mapped_pointers;
 
     /// Memory it holds, roughly
@@ -256,6 +265,14 @@ public:
     }
     [[nodiscard]] u64 MeshNativeKey() const noexcept {
         return mesh_native_key;
+    }
+
+    /// The mesh program's vegetation-cut classification, set by the pipeline cache.
+    void SetVegetationClass(VegetationClass value) noexcept {
+        vegetation_class = value;
+    }
+    [[nodiscard]] VegetationClass GetVegetationClass() const noexcept {
+        return vegetation_class;
     }
 
     /// The emulation's output buffer and workgroup count for the next Configure.
@@ -583,6 +600,7 @@ private:
     // Mesh emulation (MeshEmulationSetup).
     std::optional<MeshEmulationSetup> mesh_emulation;
     u64 mesh_native_key{};
+    VegetationClass vegetation_class{VegetationClass::None};
     vk::ShaderModule mesh_vertex_module;
     vk::Pipeline mesh_compute_pipeline;
     VkDescriptorSet mesh_descriptor_set{}; ///< shared by the dispatch and the draw it feeds

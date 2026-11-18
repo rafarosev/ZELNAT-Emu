@@ -2385,7 +2385,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
             QMessageBox::question(
                 this, tr("Recommended Ocarina of Time settings for Intel iGPUs"),
                 tr("Use the low-end Intel settings for Ocarina of Time?\n\n"
-                   "Vulkan, 0.5x resolution, GPU Fast, asynchronous shaders, BC3, conservative "
+                   "Vulkan, 0.1x resolution, GPU Fast, asynchronous shaders, BC3, conservative "
                    "VRAM, reactive flushing off, FIFO Relaxed VSync, handheld mode, FSR, and "
                    "no anti-aliasing.\n\n"
                    "They apply to Ocarina of Time until the emulator is closed. Your saved "

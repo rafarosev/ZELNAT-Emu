@@ -67,6 +67,7 @@
 #include "video_core/renderer_vulkan/vk_cooperative_hmma_test.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_binaries.h"
+#include "video_core/renderer_vulkan/vk_mesh_expansion_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache_records.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -556,11 +557,15 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
                              GuestDescriptorQueue& guest_descriptor_queue_,
                              DescriptorBufferRing& descriptor_buffer_ring_,
                              RenderPassCache& render_pass_cache_, BufferCache& buffer_cache_,
-                             TextureCache& texture_cache_, VideoCore::ShaderNotify& shader_notify_)
+                             TextureCache& texture_cache_, VideoCore::ShaderNotify& shader_notify_,
+                             MemoryAllocator& memory_allocator)
     : VideoCommon::ShaderCache{device_memory_}, device{device_}, scheduler{scheduler_},
       descriptor_pool{descriptor_pool_}, guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, render_pass_cache{render_pass_cache_},
       buffer_cache{buffer_cache_}, texture_cache{texture_cache_}, shader_notify{shader_notify_},
+      mesh_expansion_cache{Settings::IsMeshCacheEnabled()
+                               ? std::make_unique<MeshExpansionCache>(memory_allocator, scheduler_)
+                               : nullptr},
       use_asynchronous_shaders{Settings::values.use_asynchronous_shaders.GetValue()},
       use_vulkan_pipeline_cache{Settings::values.use_vulkan_driver_pipeline_cache.GetValue() &&
                                 !device_.DriverCachesPipelines()},
@@ -2671,7 +2676,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::RebuildGraphicsPipeline(KeptGra
         &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
         BuildQueue(true, bytes), nullptr, render_pass_cache, graphics_key,
         std::array<std::vector<u32>, Maxwell::MaxShaderStage>{}, infos, std::move(emit),
-        std::move(kept.mesh_emulation));
+        std::move(kept.mesh_emulation), mesh_expansion_cache.get());
     pipeline->SetMeshNativeKey(mesh_native_key);
     pipeline->SetVegetationClass(kept.vegetation_class);
     pipeline->SetMappedPointers(std::move(kept.mapped_pointers));
@@ -2907,14 +2912,12 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                         primitive_reason);
             return nullptr;
         }
-        // Draw-count compaction (EDEN_NX2_MESH_COMPACT, on unless =0): one more auxiliary
-        // buffer holds the mesh program's per-workgroup emitted counts. The task path's
-        // draw takes its count from the distribution pass, which needs
-        // vkCmdDrawIndirectCount; without it those pipelines keep the old draw.
-        static const bool mesh_compact_env{[] {
-            const char* const value{std::getenv("EDEN_NX2_MESH_COMPACT")};
-            return value == nullptr || value[0] != '0';
-        }()};
+        // Draw-count compaction (the mesh_compact setting, on unless
+        // EDEN_NX2_MESH_COMPACT=0 overrides it): one more auxiliary buffer holds the mesh
+        // program's per-workgroup emitted counts. The task path's draw takes its count
+        // from the distribution pass, which needs vkCmdDrawIndirectCount; without it
+        // those pipelines keep the old draw.
+        static const bool mesh_compact_env{Settings::IsMeshCompactEnabled()};
         const bool mesh_compact{mesh_compact_env &&
                                 (!has_task || device.IsKhrDrawIndirectCountSupported())};
         const u32 auxiliary_buffers{(has_task ? 4U : 1U) + (mesh_compact ? 1U : 0U)};
@@ -3241,7 +3244,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
         BuildQueue(build_in_parallel, defer_emission ? deferred_ir_bytes : 0), statistics,
         render_pass_cache, key, std::move(stage_spirv), infos, std::move(emit_stages),
-        std::move(mesh_emulation));
+        std::move(mesh_emulation), mesh_expansion_cache.get());
     pipeline->SetMeshNativeKey(mesh_native_key);
     pipeline->SetVegetationClass(vegetation_class);
     pipeline->SetMappedPointers(std::move(mapped_pointers));

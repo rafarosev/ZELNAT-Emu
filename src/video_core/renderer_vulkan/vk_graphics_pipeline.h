@@ -109,7 +109,7 @@ struct MeshEmulationSetup {
     u32 offsets_binding{};
     u32 args_binding{};
     std::vector<u32> distribution_spirv;
-    // Draw-count compaction (EDEN_NX2_MESH_COMPACT): the mesh program also writes its
+    // Draw-count compaction (the mesh_compact setting): the mesh program also writes its
     // per-workgroup emitted primitive counts to counts_binding, and the compaction pass
     // after the dispatch turns them into indirect draw commands (compaction_spirv), so
     // the draw rasterizes the emitted primitives instead of every workgroup's maximum.
@@ -145,6 +145,9 @@ struct KeptGraphicsStages {
     [[nodiscard]] u64 Bytes() const noexcept;
 };
 
+class MeshExpansionCache;
+struct MeshExpansionKey;
+
 class GraphicsPipeline {
     static constexpr size_t NUM_STAGES = Tegra::Engines::Maxwell3D::Regs::MaxShaderStage;
 
@@ -160,7 +163,8 @@ public:
         const GraphicsPipelineCacheKey& key, std::array<std::vector<u32>, NUM_STAGES> stages,
         const std::array<const Shader::Info*, NUM_STAGES>& infos,
         std::function<std::array<std::vector<u32>, NUM_STAGES>()> emit_stages = {},
-        std::optional<MeshEmulationSetup> mesh_emulation = std::nullopt);
+        std::optional<MeshEmulationSetup> mesh_emulation = std::nullopt,
+        MeshExpansionCache* mesh_cache = nullptr);
 
     static std::chrono::nanoseconds TakeHoldTime() noexcept;
     /// Draws resolved from the texture memo and in full since the last call.
@@ -320,6 +324,17 @@ public:
     /// The compaction pass's indirect draw commands (MeshEmulationCompactBuffers).
     [[nodiscard]] const MeshEmulationBuffer& MeshEmulationCommands() const noexcept {
         return mesh_compact_buffers[1];
+    }
+
+    /// Mesh expansion cache: on a hit, the entry's args and commands the rasterizer's draw
+    /// reads instead of this draw's own (see ConfigureDraw). Null when the draw missed.
+    [[nodiscard]] const MeshEmulationBuffer* MeshCacheArgs() const noexcept {
+        return mesh_cache_hit ? &mesh_cache_args : nullptr;
+    }
+    [[nodiscard]] const MeshEmulationBuffer* MeshCacheCommands() const noexcept {
+        return mesh_cache_hit && mesh_emulation && mesh_emulation->compact
+                   ? &mesh_cache_commands
+                   : nullptr;
     }
 
     /// Counts entries the compaction pass covers; a task draw's command cap.
@@ -490,6 +505,11 @@ private:
     template <typename Spec>
     bool ConfigureImpl(bool is_indexed);
 
+    /// The mesh expansion cache key of the draw ConfigureImpl just resolved, from its buffer
+    /// bindings, uniforms and sampled images (ConfigureDraw looks it up).
+    [[nodiscard]] MeshExpansionKey BuildMeshExpansionKey(
+        const RescalingPushConstant& rescaling, const RenderAreaPushConstant& render_area);
+
     void KeepImageDescriptors(size_t stage, size_t first_entry);
 
     void CheckColorFeedbackLoop(std::span<const VideoCommon::ImageViewInOut> views,
@@ -627,6 +647,15 @@ private:
     DescriptorAllocator compaction_allocator;
     std::array<MeshEmulationBuffer, 2> mesh_compact_buffers{};
     u32 mesh_compact_entries{};
+
+    // Mesh expansion cache (MeshExpansionCache): the pipeline cache's, null when the cache is
+    // off. The per-draw state is ConfigureImpl's image stash for the task/mesh stages and the
+    // hit's buffers ConfigureDraw resolved, read by the rasterizer after Configure.
+    MeshExpansionCache* const mesh_cache;
+    std::vector<std::array<u64, 3>> mesh_cache_images;
+    bool mesh_cache_hit{};
+    MeshEmulationBuffer mesh_cache_args{};
+    MeshEmulationBuffer mesh_cache_commands{};
 
     std::optional<PipelineBuild> build;
 };

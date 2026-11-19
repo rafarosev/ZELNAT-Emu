@@ -144,7 +144,7 @@ struct RuntimeInfo {
     u32 mesh_task_offsets_binding{~0U};
     u32 mesh_task_args_binding{~0U};
     u32 mesh_task_payload_stride{}; ///< payload buffer words per task workgroup
-    /// Draw-count compaction (EDEN_NX2_MESH_COMPACT): the mesh program also writes each
+    /// Draw-count compaction (the mesh_compact setting): the mesh program also writes each
     /// workgroup's emitted primitive count to the storage buffer at this binding, for the
     /// compaction pass to turn into indirect draw commands. ~0 when compaction is off.
     u32 mesh_counts_binding{~0U};

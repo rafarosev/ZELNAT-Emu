@@ -27,6 +27,10 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "common/cityhash.h"
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "video_core/buffer_cache/uniform_stream_reuse.h"
+#include "video_core/renderer_vulkan/vk_mesh_expansion_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_binaries.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -394,13 +398,13 @@ GraphicsPipeline::GraphicsPipeline(
     const GraphicsPipelineCacheKey& key_, std::array<std::vector<u32>, NUM_STAGES> stages,
     const std::array<const Shader::Info*, NUM_STAGES>& infos,
     std::function<std::array<std::vector<u32>, NUM_STAGES>()> emit_stages,
-    std::optional<MeshEmulationSetup> mesh_emulation_)
+    std::optional<MeshEmulationSetup> mesh_emulation_, MeshExpansionCache* mesh_cache_)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), binaries{binaries_}, scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, spirv{std::move(stages)},
       worker_only_build{build_queue.jobs && static_cast<bool>(emit_stages)},
-      mesh_emulation{std::move(mesh_emulation_)} {
+      mesh_emulation{std::move(mesh_emulation_)}, mesh_cache{mesh_cache_} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -1082,6 +1086,36 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         ReportTextureMemo();
     }
+    if (mesh_cache) {
+        // The mesh expansion cache key's image part: the views the task/mesh stages sample,
+        // in the order ConfigureImpl walks them, with their images' version ticks.
+        mesh_cache_images.clear();
+        size_t cache_view_index{};
+        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+            const Shader::Info& info{stage_infos[stage]};
+            const size_t stage_views = Shader::NumDescriptors(info.texture_buffer_descriptors) +
+                                       Shader::NumDescriptors(info.image_buffer_descriptors) +
+                                       Shader::NumDescriptors(info.texture_descriptors) +
+                                       Shader::NumDescriptors(info.image_descriptors);
+            if (info.is_task || info.is_mesh) {
+                for (size_t index = 0; index < stage_views; ++index) {
+                    const VideoCommon::ImageViewInOut& view{views[cache_view_index + index]};
+                    u64 modification{};
+                    u64 newest_alias{};
+                    if (view.id && view.id != VideoCommon::NULL_IMAGE_VIEW_ID) {
+                        if (const auto* const image{
+                                texture_cache.GetImageView(view.id).BackingImage()}) {
+                            modification = image->modification_tick;
+                            newest_alias = image->newest_alias_tick;
+                        }
+                    }
+                    mesh_cache_images.push_back(
+                        {u64{view.id.index}, modification, newest_alias});
+                }
+            }
+            cache_view_index += stage_views;
+        }
+    }
     if (RecordingSampledTextures() || DrawReuseProbeEnabled()) {
         sampled_images.clear();
         size_t view_index{};
@@ -1558,6 +1592,83 @@ void GraphicsPipeline::CheckColorFeedbackLoop(std::span<const VideoCommon::Image
 /// Writes the descriptors the stages queued and the push constants, then records the draw's state
 /// and bindings. Returns false, and the draw is skipped, when the queued descriptor count does not
 /// match the pipeline or no descriptor memory can be reserved.
+MeshExpansionKey GraphicsPipeline::BuildMeshExpansionKey(
+    const RescalingPushConstant& rescaling, const RenderAreaPushConstant& render_area) {
+    MeshExpansionKey key;
+    key.program_id = Settings::GetCurrentProgramID();
+    for (size_t stage = 0; stage + 1 < NUM_STAGES; ++stage) {
+        if (stage_infos[stage].is_task) {
+            key.task_hash = this->key.unique_hashes[stage + 1];
+        }
+        if (stage_infos[stage].is_mesh) {
+            key.mesh_hash = this->key.unique_hashes[stage + 1];
+        }
+    }
+    key.groups = mesh_groups;
+    key.capacity_words = mesh_emulation->has_task ? mesh_capacity : 0;
+    key.has_task = mesh_emulation->has_task;
+    key.compact = mesh_emulation->compact;
+    key.compact_entries = mesh_emulation->compact ? mesh_compact_entries : 0;
+    for (const u32 word : rescaling.Data()) {
+        key.push_words.push_back(word);
+    }
+    const f32 down_factor{texture_cache.IsRescaling()
+                              ? Settings::values.resolution_info.down_factor
+                              : 1.0f};
+    key.push_words.push_back(std::bit_cast<u32>(down_factor));
+    if (render_area.uses_render_area) {
+        for (const f32 word : render_area.words) {
+            key.push_words.push_back(std::bit_cast<u32>(word));
+        }
+    }
+    const auto& tracker = buffer_cache.memory_tracker;
+    auto& runtime = buffer_cache.runtime;
+    buffer_cache.ForEachBoundBuffer(
+        false, [&](u32 stage, bool storage, u32 index, bool written, const auto& binding, u32 size,
+                   const auto* host, u32 offset) {
+            if (!stage_infos[stage].is_task && !stage_infos[stage].is_mesh) {
+                return;
+            }
+            key.bindings.push_back(binding.device_addr);
+            key.bindings.push_back(offset);
+            key.bindings.push_back(size);
+            key.bindings.push_back(tracker.LastWriteEpoch(binding.device_addr, size));
+            key.bindings.push_back(host ? host->getWriteTick() : 0);
+            key.bindings.push_back(storage ? 1 : 0);
+            if (!storage && VideoCommon::KeptUniformMatches(runtime, stage, index,
+                                                             binding.device_addr, size)) {
+                const auto& slot =
+                    VideoCommon::UniformStreamReuseState<BufferCacheRuntime::StreamUniformRef>()
+                        .slots[stage][index];
+                key.bindings.push_back(Common::CityHash64(
+                    reinterpret_cast<const char*>(slot.bytes.data()), size));
+            } else {
+                key.bindings.push_back(0);
+            }
+        });
+    buffer_cache.ForEachBoundTextureBuffer(
+        false, [&](u32 stage, u32 index, bool written, bool image, const auto& binding,
+                   const auto* host, u32 offset) {
+            if (!stage_infos[stage].is_task && !stage_infos[stage].is_mesh) {
+                return;
+            }
+            key.bindings.push_back(binding.device_addr);
+            key.bindings.push_back(offset);
+            key.bindings.push_back(binding.size);
+            key.bindings.push_back(tracker.LastWriteEpoch(binding.device_addr, binding.size));
+            key.bindings.push_back(host ? host->getWriteTick() : 0);
+            key.bindings.push_back(2 | (image ? 4 : 0) |
+                                   (u64{static_cast<u32>(binding.format)} << 8));
+            key.bindings.push_back(0);
+        });
+    for (const auto& image : mesh_cache_images) {
+        key.images.push_back(image[0]);
+        key.images.push_back(image[1]);
+        key.images.push_back(image[2]);
+    }
+    return key;
+}
+
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                                      const RenderAreaPushConstant& render_area) {
     if (guest_descriptor_queue.UpdateCount() != num_descriptor_entries) {
@@ -1608,14 +1719,86 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 build->Wait(!worker_only_build);
             });
         }
-        // EDEN_NX2_MESH_BUFFER_BARRIERS=0: order the draw after the emulation's dispatch
+        // Mesh expansion cache: a draw whose full input identity an earlier draw already
+        // expanded reuses that expansion; a miss is registered for materialization once its
+        // submission finishes. Pipelines that write storage are never cached (side effects).
+        mesh_cache_hit = false;
+        std::optional<MeshExpansionKey> cache_key;
+        MeshExpansionEntry* cache_entry = nullptr;
+        const void* cache_descriptor_data = descriptor_data;
+        std::vector<DescriptorUpdateEntry> cache_payload;
+        if (mesh_cache && !writes_storage && mesh_groups != 0 && pipeline && !build->Failed()) {
+            cache_key = BuildMeshExpansionKey(rescaling, render_area);
+            cache_entry = mesh_cache->Lookup(*cache_key);
+            mesh_cache->NoteDraw(cache_entry != nullptr, mesh_emulation->has_task,
+                                 mesh_emulation->compact, *cache_key);
+            if (cache_entry) {
+                mesh_cache_hit = true;
+                mesh_cache_args = {*cache_entry->args, 0,
+                                   Shader::Backend::SPIRV::MESH_EMULATION_ARGS_WORDS * 4};
+                mesh_cache_commands = {*cache_entry->commands, 0, cache_entry->commands_size};
+                // The emulation's buffers are the payload's tail entries: point them at the
+                // entry's buffers. The payload copy rides in the record lambda below: the
+                // queue's own payload is a ring the next draws overwrite.
+                const auto* const entries =
+                    static_cast<const DescriptorUpdateEntry*>(descriptor_data);
+                cache_payload.assign(entries, entries + num_descriptor_entries);
+                const size_t tail = num_descriptor_entries - 1;
+                cache_payload[tail] = VkDescriptorBufferInfo{*cache_entry->output, 0,
+                                                             cache_entry->output_size};
+                if (mesh_emulation->has_task) {
+                    cache_payload[tail - 1] = VkDescriptorBufferInfo{
+                        *cache_entry->args, 0,
+                        Shader::Backend::SPIRV::MESH_EMULATION_ARGS_WORDS * 4};
+                }
+                cache_descriptor_data = cache_payload.data();
+            } else {
+                MeshExpansionRegistration registration;
+                registration.key = *cache_key;
+                registration.has_task = mesh_emulation->has_task;
+                registration.compact = mesh_emulation->compact;
+                registration.compact_entries = mesh_compact_entries;
+                registration.block_words = mesh_emulation->block_words;
+                registration.output_buffer = mesh_output_buffer;
+                registration.output_offset = mesh_output_offset;
+                registration.output_size = mesh_output_size;
+                if (mesh_emulation->has_task) {
+                    registration.args_buffer = mesh_task_buffers[2].buffer;
+                    registration.args_offset = mesh_task_buffers[2].offset;
+                }
+                if (mesh_emulation->compact) {
+                    registration.counts_buffer = mesh_compact_buffers[0].buffer;
+                    registration.counts_offset = mesh_compact_buffers[0].offset;
+                    registration.counts_size = mesh_compact_buffers[0].size;
+                    registration.commands_buffer = mesh_compact_buffers[1].buffer;
+                    registration.commands_offset = mesh_compact_buffers[1].offset;
+                    registration.commands_size = mesh_compact_buffers[1].size;
+                }
+                registration.tick = scheduler.CurrentTick();
+                mesh_cache->AddPending(std::move(registration));
+            }
+        }
+        // Scoped mesh barriers off (the mesh_buffer_barriers setting, or
+        // EDEN_NX2_MESH_BUFFER_BARRIERS=0): order the draw after the emulation's dispatch
         // with a global memory barrier instead of barriers on the output (and task
         // argument) buffers alone, which are all the draw's vertex shader reads.
-        static const bool mesh_buffer_barriers{[] {
-            const char* const value{std::getenv("EDEN_NX2_MESH_BUFFER_BARRIERS")};
-            return value == nullptr || value[0] != '0';
-        }()};
-        scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
+        static const bool mesh_buffer_barriers{Settings::IsMeshBufferBarriersEnabled()};
+        scheduler.Record([this, descriptor_data = cache_descriptor_data,
+                          cache_hit = mesh_cache_hit,
+                          cache_payload = std::move(cache_payload),
+                          cache_entry_output =
+                              cache_entry ? std::pair{*cache_entry->output, cache_entry->output_size}
+                                          : std::pair{VkBuffer{}, u64{}},
+                          cache_entry_args =
+                              cache_entry && mesh_emulation->has_task
+                                  ? *cache_entry->args
+                                  : VkBuffer{},
+                          cache_entry_commands =
+                              cache_entry && mesh_emulation->compact ? *cache_entry->commands
+                                                                     : VkBuffer{},
+                          cache_entry_commands_size =
+                              cache_entry ? cache_entry->commands_size : u64{},
+                          groups = mesh_groups, capacity = mesh_capacity,
                           task_buffers = mesh_task_buffers,
                           compact_buffers = mesh_compact_buffers,
                           compact_entries = mesh_compact_entries,
@@ -1773,6 +1956,44 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                            VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
                            vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            if (cache_hit) {
+                // The entry's buffers were written once by the materialize copies and are
+                // read-only since; the hit was only served once that submission finished.
+                // Order the draw's reads after those writes, as output_barrier orders a
+                // miss's dispatches.
+                bind_program_state();
+                const auto hit_barrier = [&](VkBuffer buffer, VkDeviceSize size,
+                                             VkAccessFlags dst_access,
+                                             VkPipelineStageFlags dst_stage) {
+                    const VkBufferMemoryBarrier barrier{
+                        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                        .dstAccessMask = dst_access,
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .buffer = buffer,
+                        .offset = 0,
+                        .size = size,
+                    };
+                    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, dst_stage, 0, barrier);
+                };
+                hit_barrier(cache_entry_output.first, cache_entry_output.second,
+                            VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
+                if (cache_entry_args) {
+                    hit_barrier(cache_entry_args,
+                                Shader::Backend::SPIRV::MESH_EMULATION_ARGS_WORDS * 4,
+                                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+                                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+                }
+                if (cache_entry_commands) {
+                    hit_barrier(cache_entry_commands, cache_entry_commands_size,
+                                VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+                                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+                }
+                return;
+            }
             if (!has_task) {
                 cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *mesh_compute_pipeline);
                 bind_program_state();

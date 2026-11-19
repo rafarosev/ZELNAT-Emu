@@ -64,6 +64,7 @@
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
+#include "video_core/renderer_vulkan/vk_mesh_expansion_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -429,7 +430,7 @@ const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
     // that did not fit: grow later arenas to hold them.
     const u64 max_size{(std::min)(u64{1} << 30, u64{device.GetMaxStorageBufferRange()})};
     for (MeshArena& arena : mesh_arenas) {
-        if (arena.counted || !scheduler.IsFree(arena.tick)) {
+        if (arena.counted || arena.pinned || !scheduler.IsFree(arena.tick)) {
             continue;
         }
         arena.counted = true;
@@ -445,9 +446,11 @@ const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
         }
     }
     std::erase_if(mesh_arenas, [&](const MeshArena& arena) {
-        return arena.counted && arena.size < mesh_arena_size;
+        return arena.counted && !arena.pinned && arena.size < mesh_arena_size;
     });
-    auto it{std::ranges::find_if(mesh_arenas, [](const MeshArena& arena) { return arena.counted; })};
+    auto it{std::ranges::find_if(mesh_arenas, [](const MeshArena& arena) {
+        return arena.counted && !arena.pinned;
+    })};
     if (it == mesh_arenas.end()) {
         const auto make_buffer = [&](u64 size, VkBufferUsageFlags usage, MemoryUsage memory) {
             return memory_allocator.CreateBuffer(
@@ -484,13 +487,113 @@ const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
 }
 
 void RasterizerVulkan::ReleaseMeshEmulationBuffers() {
+    HoldMeshCachePendingBuffers();
     for (StagingBufferRef& ref : mesh_draw_buffers) {
-        staging_pool.FreeDeferred(ref);
+        if (ref.buffer != VkBuffer{}) {
+            staging_pool.FreeDeferred(ref);
+        }
     }
     mesh_draw_buffers.clear();
     if (mesh_arena_used) {
         mesh_arena_used = false;
         mesh_arenas[mesh_arena_current].tick = scheduler.CurrentTick();
+    }
+}
+
+void RasterizerVulkan::HoldMeshCachePendingBuffers() {
+    MeshExpansionCache* const cache = pipeline_cache.GetMeshExpansionCache();
+    if (!cache) {
+        return;
+    }
+    // The staging buffers this draw leaves in mesh_draw_buffers are freed by this same
+    // release: mark them held first, so the loop below skips them instead of double-freeing.
+    std::vector<StagingBufferRef*> held_refs;
+    for (MeshExpansionPending& pending : cache->Pendings()) {
+        if (!pending.held.empty() || pending.arena_buffer != VkBuffer{}) {
+            continue; // taken over already
+        }
+        // The pending ConfigureDraw registered for this draw: hold every staging buffer it
+        // copies out of (an un-freed staging buffer is never recycled) and pin the arena.
+        const auto hold = [&](VkBuffer buffer, VkDeviceSize offset) {
+            for (StagingBufferRef& ref : mesh_draw_buffers) {
+                if (ref.buffer == buffer && ref.offset == offset) {
+                    pending.held.push_back(ref);
+                    held_refs.push_back(&ref);
+                    return;
+                }
+            }
+        };
+        if (!pending.has_task) {
+            hold(pending.output_buffer, pending.output_offset);
+        } else {
+            for (MeshArena& arena : mesh_arenas) {
+                if (*arena.buffer == pending.output_buffer) {
+                    arena.pinned = true;
+                    pending.arena_buffer = *arena.buffer;
+                    break;
+                }
+            }
+            hold(pending.args_buffer, pending.args_offset);
+            for (const StagingBufferRef& ref : mesh_draw_buffers) {
+                if (ref.buffer == pending.args_buffer && ref.offset == pending.args_offset) {
+                    pending.args_mapped = ref.mapped_span.subspan(
+                        (std::min)(ref.offset, u64{ref.mapped_span.size()}));
+                    break;
+                }
+            }
+        }
+        if (pending.counts_buffer) {
+            hold(pending.counts_buffer, pending.counts_offset);
+        }
+        if (pending.commands_buffer) {
+            hold(pending.commands_buffer, pending.commands_offset);
+        }
+        if (pending.has_task) {
+            // The zero word the materialize step rebases the entry's args with: the arena
+            // counter, reset to zero before the submission and never written after.
+            for (const MeshArena& arena : mesh_arenas) {
+                if (*arena.buffer == pending.output_buffer) {
+                    pending.zero_buffer = *arena.counter;
+                    pending.zero_offset = 0;
+                    break;
+                }
+            }
+        }
+    }
+    for (StagingBufferRef* const ref : held_refs) {
+        *ref = StagingBufferRef{};
+    }
+}
+
+void RasterizerVulkan::ProcessMeshCachePendings() {
+    MeshExpansionCache* const cache = pipeline_cache.GetMeshExpansionCache();
+    if (!cache) {
+        return;
+    }
+    auto& pendings = cache->Pendings();
+    for (auto it = pendings.begin(); it != pendings.end();) {
+        MeshExpansionPending& pending = *it;
+        if (!scheduler.IsFree(pending.tick)) {
+            ++it;
+            continue;
+        }
+        // The submission finished: the copies recorded now run before any reuse of the
+        // sources (held staging buffers were never freed, the arena stayed pinned).
+        cache->Materialize(pending);
+        for (StagingBufferRef& ref : pending.held) {
+            if (ref.buffer != VkBuffer{}) {
+                staging_pool.FreeDeferred(ref);
+            }
+        }
+        if (pending.arena_buffer != VkBuffer{}) {
+            for (MeshArena& arena : mesh_arenas) {
+                if (*arena.buffer == pending.arena_buffer) {
+                    arena.pinned = false;
+                    break;
+                }
+            }
+        }
+        it = pendings.erase(it);
     }
 }
 
@@ -518,7 +621,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       query_cache(gpu, *this, device_memory, query_cache_runtime),
       pipeline_cache(device_memory, device, scheduler, descriptor_pool, guest_descriptor_queue,
                      descriptor_buffer_ring, render_pass_cache, buffer_cache, texture_cache,
-                     gpu.ShaderNotify()),
+                     gpu.ShaderNotify(), memory_allocator),
       accelerate_dma(buffer_cache, texture_cache, scheduler),
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
       frame_dump(device, memory_allocator, scheduler) {
@@ -993,28 +1096,16 @@ constexpr std::array<FoliageProgram, 14> FoliagePrograms{{
     {0x839241636fce850aULL, 160, 128}, {0x4c7d6be5a7717c8dULL, 160, 128},
 }};
 
-/// EDEN_NX2_VEGETATION tiers for Ocarina of Time. The cut ships on: unset is the standard
-/// tier (foliage-signature programs with simple vertex outputs), 0 is the aggressive tier
-/// (the whole foliage output-size set), and any other value (BananaNative's 1 included)
-/// restores full vegetation. Which programs belong to the signature is decided at pipeline
-/// creation by ClassifyVegetation (vk_pipeline_cache.cpp), from the output sizes above:
+/// Vegetation cut tiers for Ocarina of Time, from Settings::GetVegetationCut (the
+/// vegetation_cut setting, with EDEN_NX2_VEGETATION still overriding it). The cut ships
+/// on: Standard is the standard tier (foliage-signature programs with simple vertex
+/// outputs), Aggressive is the whole foliage output-size set, and Full restores full
+/// vegetation. Which programs belong to the signature is decided at pipeline creation by
+/// ClassifyVegetation (vk_pipeline_cache.cpp), from the output sizes above:
 /// BananaNative's keys cannot be matched here (different hash space), their declared
-/// geometry can.
-enum class VegetationTier {
-    Full,
-    Standard,
-    Aggressive,
-};
-
-VegetationTier GetVegetationTier() {
-    static const VegetationTier tier{[] {
-        const char* const value{std::getenv("EDEN_NX2_VEGETATION")};
-        if (value == nullptr || value[0] == '\0') {
-            return VegetationTier::Standard;
-        }
-        return std::strtod(value, nullptr) == 0.0 ? VegetationTier::Aggressive
-                                                  : VegetationTier::Full;
-    }()};
+/// geometry can. Sampled once, so a change applies when the game restarts.
+Settings::VegetationCut GetVegetationTier() {
+    static const Settings::VegetationCut tier{Settings::GetVegetationCut()};
     return tier;
 }
 
@@ -1078,14 +1169,14 @@ void NoteVegetationDraw(GraphicsPipeline* pipeline) {
 }
 
 bool VegetationCutApplies(GraphicsPipeline* pipeline) {
-    const VegetationTier tier{GetVegetationTier()};
-    if (tier == VegetationTier::Full ||
+    const Settings::VegetationCut tier{GetVegetationTier()};
+    if (tier == Settings::VegetationCut::Full ||
         Settings::GetCurrentProgramID() != 0x0400486024DEC000ULL) {
         return false;
     }
     const VegetationClass vegetation_class{pipeline->GetVegetationClass()};
     const bool in_tier{vegetation_class == VegetationClass::Foliage ||
-                       (tier == VegetationTier::Aggressive &&
+                       (tier == Settings::VegetationCut::Aggressive &&
                         vegetation_class == VegetationClass::FoliageExtended)};
     if (!in_tier) {
         return false;
@@ -1258,6 +1349,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     mesh_emulation_compact = false;
     mesh_emulation_compact_entries = 0;
     if (emulated_mesh) {
+        // Mesh expansion cache: copy out the expansions of draws whose submissions finished
+        // before this draw requests its own staging buffers and arena.
+        ProcessMeshCachePendings();
         // The same group count the native path hands vkCmdDrawMeshTasksEXT (MakeDrawParams:
         // the index count for indexed draws), within the device's dispatch limit.
         const auto& draw_state{maxwell3d->draw_manager.draw_state};
@@ -1359,8 +1453,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                 request(u64{groups} * pipeline->MeshEmulationPayloadStride() * 4).first};
             const auto offsets{request(u64{groups} * 4).first};
             constexpr u64 args_bytes{Shader::Backend::SPIRV::MESH_EMULATION_ARGS_WORDS * 4};
+            const bool cache_args{pipeline_cache.GetMeshExpansionCache() != nullptr};
             const auto [args, args_span] =
-                request(args_bytes, task_probe ? MemoryUsage::Download : MemoryUsage::DeviceLocal);
+                request(args_bytes, task_probe || cache_args ? MemoryUsage::Download
+                                                             : MemoryUsage::DeviceLocal);
             const u32 capacity_words{static_cast<u32>(
                 (std::min)(bytes / 4, u64{(std::numeric_limits<u32>::max)()}))};
             if (task_probe && args_span.size() >= args_bytes) {
@@ -1485,6 +1581,16 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         reuse = NoteDrawReuse(*pipeline, is_indexed);
         reuse_path = path;
         reuse_probe_ns = VideoCommon::Nx2Profile::Now() - probe_start;
+    }
+    // Mesh expansion cache hit: the draw reads the entry's arguments and commands instead
+    // of the ones this draw's (skipped) dispatches would have written.
+    if (emulated_mesh) {
+        if (const auto* const args = pipeline->MeshCacheArgs()) {
+            mesh_emulation_indirect = {args->buffer, args->offset};
+        }
+        if (const auto* const commands = pipeline->MeshCacheCommands()) {
+            mesh_emulation_compact_commands = {commands->buffer, commands->offset};
+        }
     }
 
     TrackOcarinaCamera();

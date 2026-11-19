@@ -76,6 +76,7 @@ SWITCHABLE(CpuBackend, true);
 SWITCHABLE(CpuAccuracy, true);
 SWITCHABLE(FullscreenMode, true);
 SWITCHABLE(GpuAccuracy, true);
+SWITCHABLE(VegetationCut, true);
 SWITCHABLE(Language, true);
 SWITCHABLE(MemoryLayout, true);
 SWITCHABLE(NvdecEmulation, false);
@@ -759,6 +760,26 @@ struct Values {
                                                   true,
                                                   true};
 
+    // Mesh emulation on GPUs without mesh shaders (Switch 2 titles), and the host memory
+    // commit behind them. The EDEN_NX2_* variable of each option still overrides the
+    // setting when set; see the accessors at the bottom of this header.
+    SwitchableSetting<VegetationCut, true> vegetation_cut{linkage,
+                                                          VegetationCut::Standard,
+                                                          "vegetation_cut",
+                                                          Category::RendererAdvanced};
+
+    SwitchableSetting<bool> mesh_compact{linkage, true, "mesh_compact",
+                                         Category::RendererAdvanced};
+
+    SwitchableSetting<bool> lazy_commit{linkage, false, "lazy_commit",
+                                        Category::RendererAdvanced};
+
+    SwitchableSetting<bool> mesh_buffer_barriers{linkage, true, "mesh_buffer_barriers",
+                                                 Category::RendererAdvanced};
+
+    SwitchableSetting<bool> mesh_cache{linkage, false, "mesh_cache",
+                                       Category::RendererAdvanced};
+
 #ifdef __ANDROID__
     SwitchableSetting<bool> use_optimized_vertex_buffers{linkage,
                                                  false,
@@ -1177,6 +1198,15 @@ bool IsDMALevelSafe();
 bool IsGPUFenceBehaviorDefault();
 bool IsGPUFenceBehaviorBalanced();
 bool IsGPUFenceBehaviorAccurate();
+
+// The mesh emulation and memory options in effect: the setting, unless its EDEN_NX2_*
+// environment variable is set, in which case the variable decides (with the meaning it
+// had before the setting existed).
+VegetationCut GetVegetationCut();
+bool IsMeshCompactEnabled();
+bool IsLazyCommitEnabled();
+bool IsMeshBufferBarriersEnabled();
+bool IsMeshCacheEnabled();
 
 bool IsFastmemEnabled();
 void SetNceEnabled(bool is_64bit);

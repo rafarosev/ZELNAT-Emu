@@ -100,6 +100,8 @@ namespace Vulkan {
 class ComputePipeline;
 class DescriptorPool;
 class Device;
+class MemoryAllocator;
+class MeshExpansionCache;
 class PipelineStatistics;
 class RenderPassCache;
 class Scheduler;
@@ -133,8 +135,14 @@ public:
                            GuestDescriptorQueue& guest_descriptor_queue,
                            DescriptorBufferRing& descriptor_buffer_ring,
                            RenderPassCache& render_pass_cache, BufferCache& buffer_cache,
-                           TextureCache& texture_cache, VideoCore::ShaderNotify& shader_notify_);
+                           TextureCache& texture_cache, VideoCore::ShaderNotify& shader_notify_,
+                           MemoryAllocator& memory_allocator);
     ~PipelineCache();
+
+    /// The mesh expansion cache the graphics pipelines look up, null when it is off.
+    [[nodiscard]] MeshExpansionCache* GetMeshExpansionCache() noexcept {
+        return mesh_expansion_cache.get();
+    }
 
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
 
@@ -273,6 +281,7 @@ private:
     BufferCache& buffer_cache;
     TextureCache& texture_cache;
     VideoCore::ShaderNotify& shader_notify;
+    std::unique_ptr<MeshExpansionCache> mesh_expansion_cache;
     bool use_asynchronous_shaders{};
     bool use_vulkan_pipeline_cache{};
     /// The pipelines' builds, the prebuild and the precache. Declared before the pipelines, whose

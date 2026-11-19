@@ -12,6 +12,7 @@
 #include <atomic>
 #include <compare>
 #include <cstddef>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <functional>
@@ -59,6 +60,7 @@ SWITCHABLE(CpuBackend, true);
 SWITCHABLE(CpuAccuracy, true);
 SWITCHABLE(FullscreenMode, true);
 SWITCHABLE(GpuAccuracy, true);
+SWITCHABLE(VegetationCut, true);
 SWITCHABLE(Language, true);
 SWITCHABLE(MemoryLayout, true);
 SWITCHABLE(NvdecEmulation, false);
@@ -223,6 +225,46 @@ bool IsGPUFenceBehaviorBalanced() {
 
 bool IsGPUFenceBehaviorAccurate() {
     return values.gpu_fence_behavior.GetValue() == GpuFenceBehavior::Accurate;
+}
+
+VegetationCut GetVegetationCut() {
+    // EDEN_NX2_VEGETATION, when set and non-empty, keeps its old meaning: 0 is the
+    // aggressive tier, any other value restores full vegetation.
+    if (const char* const value = std::getenv("EDEN_NX2_VEGETATION");
+        value != nullptr && value[0] != '\0') {
+        return std::strtod(value, nullptr) == 0.0 ? VegetationCut::Aggressive
+                                                  : VegetationCut::Full;
+    }
+    return values.vegetation_cut.GetValue();
+}
+
+bool IsMeshCompactEnabled() {
+    if (const char* const value = std::getenv("EDEN_NX2_MESH_COMPACT")) {
+        return value[0] != '0';
+    }
+    return values.mesh_compact.GetValue();
+}
+
+bool IsLazyCommitEnabled() {
+    // The variable only ever requested lazy commit with exactly "1".
+    if (const char* const value = std::getenv("EDEN_NX2_LAZY_COMMIT")) {
+        return value[0] == '1' && value[1] == '\0';
+    }
+    return values.lazy_commit.GetValue();
+}
+
+bool IsMeshBufferBarriersEnabled() {
+    if (const char* const value = std::getenv("EDEN_NX2_MESH_BUFFER_BARRIERS")) {
+        return value[0] != '0';
+    }
+    return values.mesh_buffer_barriers.GetValue();
+}
+
+bool IsMeshCacheEnabled() {
+    if (const char* const value = std::getenv("EDEN_NX2_MESH_CACHE")) {
+        return value[0] != '0';
+    }
+    return values.mesh_cache.GetValue();
 }
 
 bool IsFastmemEnabled() {

@@ -165,7 +165,7 @@ public:
         if (lazy_commit) {
             if (CreateViews(true) && ProbeLazyCommit()) {
                 LOG_INFO(HW_Memory,
-                         "Lazy commit enabled (EDEN_NX2_LAZY_COMMIT=1): {} MiB of backing memory "
+                         "Lazy commit enabled (lazy_commit setting): {} MiB of backing memory "
                          "commits as it is mapped or handed out, not up front",
                          backing_size >> 20);
                 return true;
@@ -516,8 +516,7 @@ private:
     }
 
     static bool LazyCommitRequested() {
-        const char* const value = std::getenv("EDEN_NX2_LAZY_COMMIT");
-        return value != nullptr && value[0] == '1' && value[1] == '\0';
+        return Settings::IsLazyCommitEnabled();
     }
 
     /// The one Windows-semantics assumption lazy commit rests on: a page of the SEC_RESERVE

@@ -10,7 +10,9 @@
 #include <bit>
 #include <deque>
 #include <limits>
+#include <mutex>
 #include <type_traits>
+#include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
 #include <utility>
 
@@ -73,6 +75,7 @@ public:
 
     /// Mark region as CPU modified, notifying the device_tracker about this change
     void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size) {
+        BumpWriteEpoch(dirty_cpu_addr, query_size);
         ForgetSynchronized(dirty_cpu_addr, query_size);
         IteratePages<true>(dirty_cpu_addr, query_size, [](Manager* manager, u64 offset, size_t size) {
             manager->ChangeRegionState(Type::CPU, true, manager->cpu_addr + offset, size);
@@ -83,6 +86,7 @@ public:
     /// constant buffer data): the pages stay tracked, as no guest CPU write needs to be let
     /// through, and the next upload has nothing to track again.
     void MarkRegionAsWrittenTracked(VAddr dirty_cpu_addr, u64 query_size) {
+        BumpWriteEpoch(dirty_cpu_addr, query_size);
         ForgetSynchronized(dirty_cpu_addr, query_size);
         IteratePages<true>(dirty_cpu_addr, query_size, [](Manager* manager, u64 offset, size_t size) {
             manager->MarkWrittenTracked(manager->cpu_addr + offset, size);
@@ -99,6 +103,7 @@ public:
 
     /// Mark region as modified from the host GPU
     void MarkRegionAsGpuModified(VAddr dirty_cpu_addr, u64 query_size) noexcept {
+        BumpWriteEpoch(dirty_cpu_addr, query_size);
         ever_synchronized_pages.Mark(dirty_cpu_addr, query_size);
         IteratePages<true>(dirty_cpu_addr, query_size, [](Manager* manager, u64 offset, size_t size) {
             manager->ChangeRegionState(Type::GPU, true, manager->cpu_addr + offset, size);
@@ -140,6 +145,7 @@ public:
 
     /// Flushes cached CPU writes, and notify the device_tracker about the deltas
     void FlushCachedWrites(VAddr query_cpu_addr, u64 query_size) noexcept {
+        BumpWriteEpoch(query_cpu_addr, query_size);
         synchronized_mask = 0;
         IteratePages<false>(query_cpu_addr, query_size, [](Manager* manager, [[maybe_unused]] u64 offset, [[maybe_unused]] size_t size) {
             manager->FlushCachedWrites();
@@ -149,6 +155,13 @@ public:
     void FlushCachedWrites() noexcept {
         if (!cached_pages.empty()) {
             synchronized_mask = 0;
+        }
+        {
+            std::scoped_lock lock{epoch_mutex};
+            const u64 epoch{++write_epoch};
+            for (auto id : cached_pages) {
+                region_write_epochs[id] = epoch;
+            }
         }
         for (auto id : cached_pages) {
             top_tier[id]->FlushCachedWrites();
@@ -232,6 +245,39 @@ public:
         return ever_synchronized_pages.Any(query_cpu_addr, query_size);
     }
 
+    /// The newest write epoch over a range: 0 when no funnel above ever covered it. A bump
+    /// fully covering a 4 MiB region keeps only that region's entry (its page entries are
+    /// dropped); any other bump stamps every 4 KiB page it touches. A present page entry is
+    /// therefore always newer than its region's entry, and the query takes the max of both.
+    [[nodiscard]] u64 LastWriteEpoch(VAddr cpu_addr, u64 size) const {
+        if (size == 0) {
+            return 0;
+        }
+        std::scoped_lock lock{epoch_mutex};
+        u64 result{};
+        const u64 first_region{cpu_addr >> HIGHER_PAGE_BITS};
+        const u64 last_region{(cpu_addr + size - 1) >> HIGHER_PAGE_BITS};
+        for (u64 region = first_region; region <= last_region; ++region) {
+            if (const auto it = region_write_epochs.find(static_cast<u32>(region));
+                it != region_write_epochs.end()) {
+                result = (std::max)(result, it->second);
+            }
+        }
+        if (!paged_regions.empty()) {
+            const u64 first_page{cpu_addr >> DEVICE_PAGEBITS};
+            const u64 last_page{(cpu_addr + size - 1) >> DEVICE_PAGEBITS};
+            for (u64 page = first_page; page <= last_page; ++page) {
+                if (!paged_regions.contains(static_cast<u32>(page >> (HIGHER_PAGE_BITS - DEVICE_PAGEBITS)))) {
+                    continue;
+                }
+                if (const auto it = page_write_epochs.find(page); it != page_write_epochs.end()) {
+                    result = (std::max)(result, it->second);
+                }
+            }
+        }
+        return result;
+    }
+
     /// Verify mode: true when the clean words of the managers over a range match a recount.
     [[nodiscard]] bool CleanWordsHold(VAddr query_cpu_addr, u64 query_size) const noexcept {
         const size_t first = query_cpu_addr >> HIGHER_PAGE_BITS;
@@ -245,6 +291,39 @@ public:
     }
 
 private:
+    /// Stamps the range's pages with a fresh epoch (see LastWriteEpoch). Bumps arrive from CPU
+    /// and service threads too, so the table has its own lock; a bump is not on a hot path.
+    void BumpWriteEpoch(VAddr cpu_addr, u64 size) {
+        if (size == 0) {
+            return;
+        }
+        std::scoped_lock lock{epoch_mutex};
+        const u64 epoch{++write_epoch};
+        const u64 first_region{cpu_addr >> HIGHER_PAGE_BITS};
+        const u64 last_region{(cpu_addr + size - 1) >> HIGHER_PAGE_BITS};
+        const bool whole_regions{(cpu_addr & HIGHER_PAGE_MASK) == 0 &&
+                                 ((cpu_addr + size) & HIGHER_PAGE_MASK) == 0};
+        if (whole_regions) {
+            for (u64 region = first_region; region <= last_region; ++region) {
+                region_write_epochs[static_cast<u32>(region)] = epoch;
+                if (paged_regions.erase(static_cast<u32>(region)) != 0) {
+                    const u64 first_page{region << (HIGHER_PAGE_BITS - DEVICE_PAGEBITS)};
+                    const u64 last_page{first_page + (HIGHER_PAGE_SIZE >> DEVICE_PAGEBITS)};
+                    for (u64 page = first_page; page < last_page; ++page) {
+                        page_write_epochs.erase(page);
+                    }
+                }
+            }
+            return;
+        }
+        const u64 first_page{cpu_addr >> DEVICE_PAGEBITS};
+        const u64 last_page{(cpu_addr + size - 1) >> DEVICE_PAGEBITS};
+        for (u64 page = first_page; page <= last_page; ++page) {
+            page_write_epochs[page] = epoch;
+            paged_regions.insert(static_cast<u32>(page >> (HIGHER_PAGE_BITS - DEVICE_PAGEBITS)));
+        }
+    }
+
     /// The tracker marks whole pages: a write next to a range on one of its pages reaches it.
     void ForgetSynchronized(VAddr cpu_addr, u64 size) noexcept {
         const VAddr write_begin = Common::AlignDown(cpu_addr, BYTES_PER_PAGE);
@@ -356,6 +435,11 @@ private:
     std::deque<std::array<Manager, MANAGER_POOL_SIZE>> manager_pool;
     std::deque<Manager*> free_managers;
     ::Common::unordered_set<u32> cached_pages;
+    mutable std::mutex epoch_mutex;
+    u64 write_epoch{};
+    ::Common::unordered_map<u64, u64> page_write_epochs;
+    ::Common::unordered_map<u32, u64> region_write_epochs;
+    ::Common::unordered_set<u32> paged_regions;
     std::array<std::pair<VAddr, VAddr>, 64> synchronized_ranges{};
     u64 synchronized_mask{};
     PageFilter ever_synchronized_pages;

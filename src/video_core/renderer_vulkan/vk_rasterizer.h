@@ -424,6 +424,7 @@ private:
         u64 size{};
         u64 tick{};
         bool counted{}; ///< the counter of its last submission was read
+        bool pinned{};  ///< a mesh cache pending still copies out of it: never reused
     };
     std::vector<MeshArena> mesh_arenas;
     size_t mesh_arena_current{~size_t{}};
@@ -437,6 +438,11 @@ private:
     boost::container::static_vector<StagingBufferRef, 6> mesh_draw_buffers;
     bool mesh_arena_used{};
     void ReleaseMeshEmulationBuffers();
+    /// Mesh expansion cache: materialize the pendings whose submissions finished (their
+    /// held staging buffers and pinned arenas are released), and take over the pendings
+    /// ConfigureDraw registered for this draw.
+    void ProcessMeshCachePendings();
+    void HoldMeshCachePendingBuffers();
 
     /// Fast draw (nx2_fast_draw.h): what the last recorded draw left bound.
     struct ReusableDraw {

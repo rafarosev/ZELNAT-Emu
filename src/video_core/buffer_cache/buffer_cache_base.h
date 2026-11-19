@@ -528,6 +528,45 @@ public:
         }
     }
 
+    /// Visits the texture buffers bound for the last draw or dispatch, as ForEachBoundBuffer
+    /// does for uniform and storage buffers (which it does not cover).
+    template <typename Func>
+    void ForEachBoundTextureBuffer(bool compute, Func&& func) {
+        const auto visit = [&](u32 stage, u32 index, bool written, bool image,
+                               const TextureBufferBinding& binding) {
+            if (binding.device_addr == 0 || binding.size == 0) {
+                return;
+            }
+            const Buffer* host = nullptr;
+            u32 offset = 0;
+            if (const BufferId id = page_table[binding.device_addr >> CACHING_PAGEBITS]) {
+                const Buffer& buffer = slot_buffers[id];
+                if (buffer.IsInBounds(binding.device_addr, binding.size)) {
+                    host = &buffer;
+                    offset = buffer.Offset(binding.device_addr);
+                }
+            }
+            func(stage, index, written, image, binding, host, offset);
+        };
+        if (compute) {
+            ForEachEnabledBit(channel_state->enabled_compute_texture_buffers, [&](u32 index) {
+                visit(5, index,
+                      ((channel_state->written_compute_texture_buffers >> index) & 1) != 0,
+                      ((channel_state->image_compute_texture_buffers >> index) & 1) != 0,
+                      channel_state->compute_texture_buffers[index]);
+            });
+            return;
+        }
+        for (u32 stage = 0; stage < NUM_STAGES; ++stage) {
+            ForEachEnabledBit(channel_state->enabled_texture_buffers[stage], [&](u32 index) {
+                visit(stage, index,
+                      ((channel_state->written_texture_buffers[stage] >> index) & 1) != 0,
+                      ((channel_state->image_texture_buffers[stage] >> index) & 1) != 0,
+                      channel_state->texture_buffers[stage][index]);
+            });
+        }
+    }
+
     /// Return true when a region is registered on the cache
     [[nodiscard]] bool IsRegionRegistered(DAddr addr, size_t size);
 

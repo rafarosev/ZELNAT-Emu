@@ -416,6 +416,34 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Used by the Bounded mode: the most time per frame that Switch 2 draws may wait in "
               "total for pipelines that are still building. Once spent, the remaining unbuilt "
               "draws of that frame are skipped."));
+    INSERT(Settings, vegetation_cut, tr("Vegetation cut:"),
+           tr("Skips the foliage draws of Ocarina of Time (Switch 2) whose mesh shaders match "
+              "the foliage signature, which is most of its grass and leaves.\nStandard cuts the "
+              "simple foliage programs, Aggressive the whole foliage set, and Full draws "
+              "everything.\nTakes effect when the game restarts. The EDEN_NX2_VEGETATION "
+              "environment variable overrides this when set."));
+    INSERT(Settings, mesh_compact, tr("Mesh draw compaction"),
+           tr("Rasterizes only the primitives a mesh shader actually emitted instead of every "
+              "workgroup's declared maximum, using an extra compute pass per draw.\nOnly "
+              "applies to Switch 2 mesh draws on GPUs without mesh shader support.\nTakes "
+              "effect when the game restarts. EDEN_NX2_MESH_COMPACT=0 in the environment "
+              "overrides this off."));
+    INSERT(Settings, lazy_commit, tr("Lazy memory commit"),
+           tr("Reserves the guest's backing memory without committing it, and commits pages "
+              "as the game maps or is handed them, instead of committing everything up "
+              "front.\nLowers the memory committed at startup on large-memory titles "
+              "(Windows only).\nTakes effect when the emulator restarts. The "
+              "EDEN_NX2_LAZY_COMMIT environment variable overrides this when set."));
+    INSERT(Settings, mesh_buffer_barriers, tr("Scoped mesh barriers"),
+           tr("Orders each emulated mesh draw after its compute dispatch with barriers on "
+              "the emulation's buffers alone, which is all the draw reads.\nTurning it off "
+              "uses one global memory barrier per draw instead: slower, but useful to rule "
+              "out ordering issues.\nTakes effect when the game restarts. "
+              "EDEN_NX2_MESH_BUFFER_BARRIERS=0 in the environment overrides this off."));
+    INSERT(Settings, mesh_cache, tr("Mesh expansion cache"),
+           tr("Keeps the expanded output of mesh draws whose inputs did not change and "
+              "reuses it on later frames, instead of running the task and mesh emulation "
+              "again.\nExperimental. Takes effect when the game restarts."));
     INSERT(Settings, enable_compute_pipelines, tr("Enable Compute Pipelines (Intel Vulkan Only)"),
            tr("Required by some games.\nThis setting only exists for Intel "
               "proprietary drivers and may crash if enabled.\nCompute pipelines are always enabled "
@@ -640,6 +668,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(NativeComputeWriteMark, Auto, tr("Auto (shader extent)")),
                               PAIR(NativeComputeWriteMark, Full, tr("Full binding")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::VegetationCut>::Index(),
+                          {
+                              PAIR(VegetationCut, Full, tr("Full vegetation")),
+                              PAIR(VegetationCut, Standard, tr("Standard cut")),
+                              PAIR(VegetationCut, Aggressive, tr("Aggressive cut")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::GpuFenceBehavior>::Index(),
                           {

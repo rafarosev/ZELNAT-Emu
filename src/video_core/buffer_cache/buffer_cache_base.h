@@ -249,6 +249,11 @@ public:
 
     void TickFrame();
 
+    /// The write-epoch table the cross-frame mesh expansion cache keys on.
+    [[nodiscard]] const MemoryTracker& GetMemoryTracker() const noexcept {
+        return memory_tracker;
+    }
+
     bool BindMultiRangeStorage(const Binding& binding, bool is_written,
                                std::span<const MultiRangeSegment> pool,
                                u64 write_mark_limit = ~u64{0});

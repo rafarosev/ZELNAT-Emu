@@ -5,7 +5,7 @@
 #include <array>
 #include <cstring>
 
-#include "common/logging/log.h"
+#include "common/logging.h"
 #include "common/settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "video_core/renderer_vulkan/vk_mesh_expansion_cache.h"

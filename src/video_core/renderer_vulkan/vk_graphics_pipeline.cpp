@@ -1621,7 +1621,7 @@ MeshExpansionKey GraphicsPipeline::BuildMeshExpansionKey(
             key.push_words.push_back(std::bit_cast<u32>(word));
         }
     }
-    const auto& tracker = buffer_cache.memory_tracker;
+    const auto& tracker = buffer_cache.GetMemoryTracker();
     auto& runtime = buffer_cache.runtime;
     buffer_cache.ForEachBoundBuffer(
         false, [&](u32 stage, bool storage, u32 index, bool written, const auto& binding, u32 size,

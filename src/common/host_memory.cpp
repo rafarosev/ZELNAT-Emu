@@ -13,6 +13,7 @@
 #include <psapi.h>
 #include <vector>
 #include "common/dynamic_library.h"
+#include "common/settings.h"
 
 #else // ^^^ Windows ^^^ vvv POSIX vvv
 

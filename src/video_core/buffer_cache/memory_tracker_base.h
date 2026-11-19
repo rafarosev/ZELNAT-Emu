@@ -18,6 +18,7 @@
 
 #include "common/alignment.h"
 #include "common/common_types.h"
+#include "core/device_memory_manager.h"
 #include "video_core/buffer_cache/word_manager.h"
 #include "video_core/page_filter.h"
 
@@ -264,10 +265,10 @@ public:
             }
         }
         if (!paged_regions.empty()) {
-            const u64 first_page{cpu_addr >> DEVICE_PAGEBITS};
-            const u64 last_page{(cpu_addr + size - 1) >> DEVICE_PAGEBITS};
+            const u64 first_page{cpu_addr >> Core::DEVICE_PAGEBITS};
+            const u64 last_page{(cpu_addr + size - 1) >> Core::DEVICE_PAGEBITS};
             for (u64 page = first_page; page <= last_page; ++page) {
-                if (!paged_regions.contains(static_cast<u32>(page >> (HIGHER_PAGE_BITS - DEVICE_PAGEBITS)))) {
+                if (!paged_regions.contains(static_cast<u32>(page >> (HIGHER_PAGE_BITS - Core::DEVICE_PAGEBITS)))) {
                     continue;
                 }
                 if (const auto it = page_write_epochs.find(page); it != page_write_epochs.end()) {
@@ -307,8 +308,8 @@ private:
             for (u64 region = first_region; region <= last_region; ++region) {
                 region_write_epochs[static_cast<u32>(region)] = epoch;
                 if (paged_regions.erase(static_cast<u32>(region)) != 0) {
-                    const u64 first_page{region << (HIGHER_PAGE_BITS - DEVICE_PAGEBITS)};
-                    const u64 last_page{first_page + (HIGHER_PAGE_SIZE >> DEVICE_PAGEBITS)};
+                    const u64 first_page{region << (HIGHER_PAGE_BITS - Core::DEVICE_PAGEBITS)};
+                    const u64 last_page{first_page + (HIGHER_PAGE_SIZE >> Core::DEVICE_PAGEBITS)};
                     for (u64 page = first_page; page < last_page; ++page) {
                         page_write_epochs.erase(page);
                     }
@@ -316,11 +317,11 @@ private:
             }
             return;
         }
-        const u64 first_page{cpu_addr >> DEVICE_PAGEBITS};
-        const u64 last_page{(cpu_addr + size - 1) >> DEVICE_PAGEBITS};
+        const u64 first_page{cpu_addr >> Core::DEVICE_PAGEBITS};
+        const u64 last_page{(cpu_addr + size - 1) >> Core::DEVICE_PAGEBITS};
         for (u64 page = first_page; page <= last_page; ++page) {
             page_write_epochs[page] = epoch;
-            paged_regions.insert(static_cast<u32>(page >> (HIGHER_PAGE_BITS - DEVICE_PAGEBITS)));
+            paged_regions.insert(static_cast<u32>(page >> (HIGHER_PAGE_BITS - Core::DEVICE_PAGEBITS)));
         }
     }
 
